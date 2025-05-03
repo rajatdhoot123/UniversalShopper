@@ -11,21 +11,18 @@ import uuid
 import json
 from typing import Dict, Optional, List, Any
 
-# Import our bot module 
+# Import our bot module
 from flipkart_bot_api import (
-    create_or_load_session,
-    start_purchase_process,
     get_active_processes,
     submit_login_otp,
     select_address,
     submit_payment_details,
-    submit_bank_otp,
     get_process_status,
     checkout_process_manager,
     terminate_process
 )
 
-app = FastAPI(title="Flipkart Checkout Bot API", 
+app = FastAPI(title="Flipkart Checkout Bot API",
               description="API for automating Flipkart checkout process",
               version="1.0.0")
 
@@ -42,7 +39,8 @@ app.add_middleware(
 try:
     debug_images_dir = Path("debug_images")
     debug_images_dir.mkdir(exist_ok=True)
-    app.mount("/debug-images", StaticFiles(directory="debug_images"), name="debug_images")
+    app.mount("/debug-images", StaticFiles(directory="debug_images"),
+              name="debug_images")
 except Exception as e:
     print(f"Warning: Could not mount debug-images directory: {e}")
 
@@ -51,18 +49,23 @@ sessions_dir = Path("sessions")
 sessions_dir.mkdir(exist_ok=True)
 
 # Data models for API requests and responses
+
+
 class ProductRequest(BaseModel):
     product_url: str
     session_name: Optional[str] = None
     use_existing_session: bool = False
 
+
 class OTPRequest(BaseModel):
     process_id: str
     otp: str
 
+
 class AddressSelectionRequest(BaseModel):
     process_id: str
     address_index: int
+
 
 class PaymentDetailsRequest(BaseModel):
     process_id: str
@@ -72,14 +75,17 @@ class PaymentDetailsRequest(BaseModel):
     expiry_year: Optional[str] = None
     expiry_combined: Optional[str] = None
 
+
 class BankOTPRequest(BaseModel):
     process_id: str
     otp: str
+
 
 class StatusResponse(BaseModel):
     status: str
     message: str
     data: Optional[Dict[str, Any]] = None
+
 
 @app.get("/", response_model=StatusResponse)
 async def read_root():
@@ -88,6 +94,7 @@ async def read_root():
         "message": "Flipkart Checkout Bot API is running",
         "data": {"version": "1.0.0"}
     }
+
 
 @app.get("/sessions", response_model=StatusResponse)
 async def list_sessions():
@@ -99,12 +106,13 @@ async def list_sessions():
         "data": {"sessions": session_files}
     }
 
+
 @app.post("/process", response_model=StatusResponse)
 async def start_process(request: ProductRequest, background_tasks: BackgroundTasks):
     """Start a new checkout process for a product"""
     try:
         process_id = str(uuid.uuid4())
-        
+
         # Initialize session
         session_path = None
         if request.use_existing_session and request.session_name:
@@ -120,7 +128,7 @@ async def start_process(request: ProductRequest, background_tasks: BackgroundTas
                 )
         elif not request.use_existing_session and request.session_name:
             session_path = sessions_dir / f"{request.session_name}.json"
-        
+
         # Start the process in background
         background_tasks.add_task(
             checkout_process_manager,
@@ -128,7 +136,7 @@ async def start_process(request: ProductRequest, background_tasks: BackgroundTas
             request.product_url,
             session_path
         )
-        
+
         return {
             "status": "success",
             "message": "Checkout process started",
@@ -148,6 +156,7 @@ async def start_process(request: ProductRequest, background_tasks: BackgroundTas
             }
         )
 
+
 @app.get("/process/{process_id}", response_model=StatusResponse)
 async def get_process(process_id: str):
     """Get status of a specific checkout process"""
@@ -161,12 +170,13 @@ async def get_process(process_id: str):
                 "data": None
             }
         )
-    
+
     return {
         "status": "success",
         "message": "Process status retrieved successfully",
         "data": status
     }
+
 
 @app.get("/processes", response_model=StatusResponse)
 async def list_processes():
@@ -177,6 +187,7 @@ async def list_processes():
         "message": f"Found {len(active_processes)} active processes",
         "data": {"processes": active_processes}
     }
+
 
 @app.post("/process/{process_id}/login-otp", response_model=StatusResponse)
 async def handle_login_otp(process_id: str, otp_request: OTPRequest):
@@ -191,12 +202,13 @@ async def handle_login_otp(process_id: str, otp_request: OTPRequest):
                 "data": None
             }
         )
-    
+
     return {
         "status": "success",
         "message": "OTP submitted successfully",
         "data": None
     }
+
 
 @app.post("/process/{process_id}/select-address", response_model=StatusResponse)
 async def handle_address_selection(process_id: str, address_request: AddressSelectionRequest):
@@ -211,12 +223,13 @@ async def handle_address_selection(process_id: str, address_request: AddressSele
                 "data": None
             }
         )
-    
+
     return {
         "status": "success",
         "message": "Address selected successfully",
         "data": None
     }
+
 
 @app.post("/process/{process_id}/payment", response_model=StatusResponse)
 async def handle_payment(process_id: str, payment_request: PaymentDetailsRequest):
@@ -229,22 +242,23 @@ async def handle_payment(process_id: str, payment_request: PaymentDetailsRequest
         payment_request.expiry_year,
         payment_request.expiry_combined
     )
-    
+
     if not success:
         return JSONResponse(
             status_code=404,
             content={
-                "status": "error", 
+                "status": "error",
                 "message": f"Process with ID {process_id} not found or not at payment stage",
                 "data": None
             }
         )
-    
+
     return {
         "status": "success",
         "message": "Payment details submitted successfully",
         "data": None
     }
+
 
 @app.post("/process/{process_id}/bank-otp", response_model=StatusResponse)
 async def handle_bank_otp(process_id: str, bank_otp_request: BankOTPRequest):
@@ -259,22 +273,24 @@ async def handle_bank_otp(process_id: str, bank_otp_request: BankOTPRequest):
                 "data": None
             }
         )
-    
+
     return {
         "status": "success",
         "message": "Bank OTP submitted successfully",
         "data": None
     }
 
+
 @app.delete("/process/{process_id}", response_model=StatusResponse)
 async def handle_terminate_process(process_id: str):
     """Terminate a specific checkout process"""
-    # NOTE: The actual termination logic needs to be implemented 
+    # NOTE: The actual termination logic needs to be implemented
     # in flipkart_bot_api.terminate_process(process_id)
-    # This function should signal the background task to stop gracefully 
+    # This function should signal the background task to stop gracefully
     # and update its status.
-    
-    success = await terminate_process(process_id) # Assuming terminate_process is async
+
+    # Assuming terminate_process is async
+    success = await terminate_process(process_id)
 
     if not success:
         return JSONResponse(
@@ -285,7 +301,7 @@ async def handle_terminate_process(process_id: str):
                 "data": None
             }
         )
-    
+
     return {
         "status": "success",
         "message": f"Process {process_id} termination requested successfully",
@@ -293,4 +309,4 @@ async def handle_terminate_process(process_id: str):
     }
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True) 
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

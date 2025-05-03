@@ -4,6 +4,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright, Page, TimeoutError, Response, Route
 import re
 import json
+import aiohttp
 from typing import Dict, List, Optional, Any, Union
 import time
 from datetime import datetime
@@ -138,6 +139,71 @@ def add_process_screenshot(process_id: str, screenshot_path: str):
 # Functions for handling user inputs
 
 
+# --- New Helper Function for AI Selector ---
+async def get_button_selector_from_ai(html_content: str) -> Optional[str]:
+    """
+    Sends HTML content to an AI model via OpenRouter to get a CSS selector
+    for the primary action button (e.g., Submit, Confirm, Pay) on an OTP page.
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        print("Error: OPENROUTER_API_KEY environment variable not set.")
+        return None
+
+    api_url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    # Simple prompt asking for the selector of the main submit button
+    prompt = f"""Given the following HTML content from a bank OTP verification page, please provide the most likely CSS selector for the single button used to submit the OTP (e.g., 'Submit', 'Confirm', 'Pay'). Only return the CSS selector string, nothing else. If you cannot confidently determine the selector, return 'None'.
+
+HTML:
+```html
+{html_content[:15000]}
+```
+
+CSS Selector:""" # Limit HTML size to avoid overly large requests
+
+    payload = {
+        "model": "deepseek/deepseek-r1-distill-qwen-14b:free", # Using the model from the example
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "max_tokens": 50 # Limit response size
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, headers=headers, json=payload, timeout=30) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    ai_response = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    # Basic validation: check if it looks like a selector and isn't 'None'
+                    if ai_response and ai_response != 'None' and ('#' in ai_response or '.' in ai_response or '[' in ai_response or ':' in ai_response or re.match(r'^[a-zA-Z0-9_ >\-\*]+$', ai_response)):
+                        print(f"AI suggested selector: {ai_response}")
+                        return ai_response
+                    else:
+                        print(f"AI did not provide a valid selector. Response: '{ai_response}'")
+                        return None
+                else:
+                    print(f"Error calling OpenRouter API: Status {response.status}, Response: {await response.text()}")
+                    return None
+    except aiohttp.ClientConnectorError as e:
+        print(f"Network error calling OpenRouter API: {e}")
+        return None
+    except asyncio.TimeoutError:
+        print("Timeout calling OpenRouter API.")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred during AI selector fetch: {e}")
+        return None
+# --- End New Helper Function ---
+
+
 async def submit_login_otp(process_id: str, otp: str) -> bool:
     """Submit OTP for login."""
     if process_id not in active_processes or active_processes[process_id]["stage"] != "OTP_REQUESTED":
@@ -214,24 +280,137 @@ async def submit_payment_details(
     return True
 
 
-async def submit_bank_otp(process_id: str, otp: str) -> bool:
-    """Submit bank OTP."""
-    if process_id not in active_processes or active_processes[process_id]["stage"] != "BANK_OTP_REQUESTED":
-        print(
-            f"[submit_bank_otp] Process {process_id} not found or not in BANK_OTP_REQUESTED stage. Current stage: {active_processes.get(process_id, {}).get('stage')}")
+async def handle_bank_otp_api(process_id: str, page: Page):
+    """Handle the bank OTP verification page, using AI to find the submit button."""
+    # Default Selectors (will be overridden by AI if successful)
+    otp_input_selector = 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i], input:near(:text("Enter your code"))'
+    default_confirm_button_selector = 'button:text-matches("CONFIRM|SUBMIT|PAY", "i"), input[type="submit"]:text-matches("CONFIRM|SUBMIT|PAY", "i")'
+    # Removed iframe selectors
+
+    try:
+        # Take screenshot of bank OTP page
+        screenshot_path = await create_debug_screenshot(page, "bank_otp_page")
+        add_process_screenshot(process_id, screenshot_path)
+
+        # Use page context directly
+        context_locator = page
+        print("Using context: page")
+
+        # Wait for OTP input field
+        otp_input = context_locator.locator(otp_input_selector).first
+        print(f"Waiting for OTP input field using selector: '{otp_input_selector}'")
+        await otp_input.wait_for(state='visible', timeout=45000)
+        print("OTP input field found.")
+
+        # --- AI Button Selector Logic ---
+        print("Attempting to get button selector from AI...")
+        html_content = await page.content()
+        dynamic_selector = await get_button_selector_from_ai(html_content)
+
+        confirm_button_selector = default_confirm_button_selector # Start with default
+        if dynamic_selector:
+            print(f"Using AI-provided selector: '{dynamic_selector}'")
+            confirm_button_selector = dynamic_selector
+        else:
+            print(f"AI failed or didn't provide a selector. Using default: '{default_confirm_button_selector}'")
+        # --- End AI Button Selector Logic ---
+
+
+        # Update process status requesting bank OTP
+        update_process_status(process_id, "BANK_OTP_REQUESTED",
+                              "Please provide bank OTP via API")
+
+        # Wait for bank OTP via API
+        if process_id not in event_locks:
+            event_locks[process_id] = asyncio.Event()
+
+        print("Waiting for Bank OTP submission via API...")
+        await event_locks[process_id].wait()
+        event_locks[process_id].clear()  # Reset for next wait
+        print("Received signal for Bank OTP submission.")
+
+
+        # Get bank OTP from process data
+        if "bank_otp" in active_processes[process_id]["data"]:
+            bank_otp = active_processes[process_id]["data"]["bank_otp"]
+            print(f"Retrieved Bank OTP from process data.")
+
+
+            # Fill OTP
+            print(f"Filling OTP input with received OTP...")
+            await otp_input.fill(bank_otp)
+            await page.wait_for_timeout(1000) # Short pause after filling
+            print("OTP filled.")
+
+
+            # Take screenshot after filling OTP
+            screenshot_path = await create_debug_screenshot(page, "after_bank_otp_fill")
+            add_process_screenshot(process_id, screenshot_path)
+
+            # Locate and click the confirm button using the determined selector
+            print(f"Locating confirm button using selector: '{confirm_button_selector}'")
+            confirm_button = context_locator.locator(confirm_button_selector).first
+
+            print("Waiting for confirm button to be visible/enabled...")
+            # Wait for button to be potentially clickable (visible/enabled)
+            try:
+                 await confirm_button.wait_for(state='visible', timeout=15000)
+                 print("Confirm button is visible. Attempting click...")
+                 await confirm_button.click(timeout=10000) # Click with timeout
+                 print("Clicked confirm button.")
+            except TimeoutError:
+                 print("Confirm button was not visible/enabled within timeout. Attempting force click...")
+                 try:
+                    await confirm_button.click(force=True, timeout=10000)
+                    print("Clicked confirm button (force=True).")
+                 except Exception as force_click_err:
+                     print(f"Force click also failed: {force_click_err}")
+                     update_process_status(process_id, "ERROR", f"Failed to click confirm OTP button: {str(force_click_err)}")
+                     screenshot_path_click_error = await create_debug_screenshot(page, "bank_otp_confirm_click_error")
+                     add_process_screenshot(process_id, screenshot_path_click_error)
+                     return False
+            except Exception as click_err:
+                 print(f"Error clicking confirm button: {click_err}")
+                 update_process_status(process_id, "ERROR", f"Error clicking confirm OTP button: {str(click_err)}")
+                 screenshot_path_click_error = await create_debug_screenshot(page, "bank_otp_confirm_click_error")
+                 add_process_screenshot(process_id, screenshot_path_click_error)
+                 return False
+
+
+            # Wait for final confirmation/redirect
+            print("Waiting for page navigation/load after submitting bank OTP...")
+            await page.wait_for_load_state('networkidle', timeout=90000)
+            print("Navigation/load complete after bank OTP submission.")
+
+
+            # Take screenshot of final confirmation
+            screenshot_path = await create_debug_screenshot(page, "final_confirmation")
+            add_process_screenshot(process_id, screenshot_path)
+
+            # Check final URL / content for success confirmation (Optional but recommended)
+            final_url = page.url
+            print(f"Final URL after bank OTP: {final_url}")
+            # TODO: Add logic here to check if final_url indicates success or failure
+
+            update_process_status(process_id, "COMPLETED",
+                                  "Order completed successfully (pending final verification)") # Adjusted message
+            return True
+        else:
+            update_process_status(process_id, "ERROR",
+                                  "Bank OTP missing from process data after waiting") # Adjusted message
+            return False
+
+    except Exception as e:
+        error_msg = f"Error during bank OTP processing: {str(e)}"
+        print(error_msg)
+        update_process_status(process_id, "ERROR", error_msg)
+        try: # Ensure screenshot happens even if page context is invalid later
+            if page and not page.is_closed():
+                screenshot_path = await create_debug_screenshot(page, "bank_otp_error")
+                add_process_screenshot(process_id, screenshot_path)
+        except Exception as ss_err:
+            print(f"Could not take screenshot during bank OTP error handling: {ss_err}")
         return False
-
-    if process_id not in event_locks:
-        return False
-
-    # Store Bank OTP in process data
-    update_process_status(process_id, "BANK_OTP_SUBMITTED", "Bank OTP submitted, processing", {
-        "bank_otp": otp
-    })
-
-    # Set the event to resume the checkout process
-    event_locks[process_id].set()
-    return True
 
 # Page state detection
 
@@ -1055,88 +1234,6 @@ async def handle_payment_api(process_id: str, page: Page):
         return False
 
 
-async def handle_bank_otp_api(process_id: str, page: Page):
-    """Handle the bank OTP verification page."""
-    # Selectors (Assume elements are on the main page)
-    otp_input_selector = 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i], input:near(:text("Enter your code"))'
-    confirm_button_selector = 'button:text-matches("CONFIRM|SUBMIT|PAY", "i"), input[type="submit"]:text-matches("CONFIRM|SUBMIT|PAY", "i")'
-    # Removed iframe selectors
-
-    try:
-        # Take screenshot of bank OTP page
-        screenshot_path = await create_debug_screenshot(page, "bank_otp_page")
-        add_process_screenshot(process_id, screenshot_path)
-
-        # Use page context directly
-        context_locator = page
-        print("Using context: page (iframe logic removed)")
-
-        # Wait for OTP input field
-        otp_input = context_locator.locator(otp_input_selector).first
-        await otp_input.wait_for(state='visible', timeout=45000)
-
-        # Update process status requesting bank OTP
-        update_process_status(process_id, "BANK_OTP_REQUESTED",
-                              "Please provide bank OTP via API")
-
-        # Wait for bank OTP via API
-        if process_id not in event_locks:
-            event_locks[process_id] = asyncio.Event()
-
-        await event_locks[process_id].wait()
-        event_locks[process_id].clear()  # Reset for next wait
-
-        # Get bank OTP from process data
-        if "bank_otp" in active_processes[process_id]["data"]:
-            bank_otp = active_processes[process_id]["data"]["bank_otp"]
-
-            # Fill OTP
-            await otp_input.fill(bank_otp)
-            await page.wait_for_timeout(2000)
-
-            # Take screenshot after filling OTP
-            screenshot_path = await create_debug_screenshot(page, "after_bank_otp_fill")
-            add_process_screenshot(process_id, screenshot_path)
-
-            # Click confirm button
-            confirm_button = context_locator.locator(
-                confirm_button_selector).first
-            await confirm_button.click()
-
-            # Wait for final confirmation/redirect
-            await page.wait_for_load_state('networkidle', timeout=90000)
-
-            # Take screenshot of final confirmation
-            screenshot_path = await create_debug_screenshot(page, "final_confirmation")
-            add_process_screenshot(process_id, screenshot_path)
-
-            update_process_status(process_id, "COMPLETED",
-                                  "Order completed successfully")
-            return True
-        else:
-            update_process_status(process_id, "ERROR",
-                                  "Bank OTP missing from process data")
-            return False
-
-    except Exception as e:
-        update_process_status(process_id, "ERROR",
-                              f"Error during bank OTP processing: {str(e)}")
-        screenshot_path = await create_debug_screenshot(page, "bank_otp_error")
-        add_process_screenshot(process_id, screenshot_path)
-        return False
-
-# State to Handler Mapping - Moved here after handlers are defined
-STATE_HANDLERS = {
-    "LOGIN": handle_login_api,
-    "ADDRESS": handle_address_selection_api,
-    "ORDER_SUMMARY": handle_order_summary_api,
-    "PAYMENT": handle_payment_api,
-    "BANK_OTP": handle_bank_otp_api,
-}
-
-# Add the start_purchase_process function that was referenced but not defined
-
-
 async def start_purchase_process(
     process_id: str,
     product_url: str,
@@ -1258,3 +1355,12 @@ async def terminate_process(process_id: str) -> bool:
     # Return True assuming the cancellation signal was sent.
     # The actual task cancellation might take time.
     return True
+
+# State to Handler Mapping - Moved here after handlers are defined
+STATE_HANDLERS = {
+    "LOGIN": handle_login_api,
+    "ADDRESS": handle_address_selection_api,
+    "ORDER_SUMMARY": handle_order_summary_api,
+    "PAYMENT": handle_payment_api,
+    "BANK_OTP": handle_bank_otp_api,
+}
