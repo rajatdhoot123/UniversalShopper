@@ -1,12 +1,13 @@
 import asyncio
 import os
 from pathlib import Path
-from playwright.async_api import async_playwright, Page, TimeoutError, Response
+from playwright.async_api import async_playwright, Page, TimeoutError, Response, Route
 import re
 import json
 from typing import Dict, List, Optional, Any, Union
 import time
 from datetime import datetime
+import pdb
 
 # Create debug images directory
 debug_images_dir = Path("debug_images")
@@ -29,15 +30,19 @@ PROCESS_STATES = {
     "SELECTING_ADDRESS": "Waiting for address selection",
     "ORDER_SUMMARY": "Processing order summary",
     "PAYMENT_REQUESTED": "Waiting for payment details",
+    "PAYMENT_CLICKED": "Pay button clicked, waiting for bank page",
+    "PAYMENT_NAVIGATION_COMPLETE": "Navigation to bank page complete, detecting state",
     "BANK_OTP_REQUESTED": "Waiting for bank OTP",
     "COMPLETED": "Checkout process completed",
     "ERROR": "An error occurred during checkout",
-    "CANCELLED": "Checkout process was cancelled"
+    "CANCELLED": "Checkout process was cancelled",
+    "POST_BUY_NOW": "Clicked Buy Now, detecting next step"
 }
 
 # Event locks for synchronization
 event_locks = {}
 
+# State to Handler Mapping definition moved below handler functions
 
 async def create_or_load_session(session_path: Optional[Path] = None) -> Path:
     """Create a new session or load an existing one."""
@@ -258,30 +263,58 @@ async def detect_page_state(page: Page) -> str:
             "context": "page"
         },
         # --- BANK OTP Checks --- (Add more specific checks before generic ones)
-        # 1. Check for SBI specific OTP page (on main page)
+        # Priority: Specific elements > Specific Iframes > Generic Iframes > Generic Page
+        # 1. Original SBI Check (Input + Visible Submit Button as sibling) - Strictest
         {
             "state_name": "BANK_OTP",
-            "selector": 'input#otpValue[type="password"]',
+            "selector": 'input#otpValue[type="password"]:visible +button:text-matches("Submit", "i"):visible',
             "context": "page"
         },
-        # 2. Check for generic OTP in common iframes
+        # 2. Simpler SBI Check (Input only) - Catches case where button isn't sibling or is disabled
         {
             "state_name": "BANK_OTP",
-            "selector": 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i]',
-            "context": "iframe",
-            "iframe_selectors": ['iframe[id*="card"]', 'iframe[name*="card"]', 'iframe[title*="3D Secure"]', 'iframe']
+            "selector": 'input#otpValue[type="password"]', # Primary SBI OTP input
+            "context": "page"
         },
-         # 3. Check for generic OTP on main page (fallback)
+        # 3. SBI page text hint (Lower priority fallback)
         {
             "state_name": "BANK_OTP",
-            "selector": 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i]',
+            "selector": 'h2:has-text("Enter One Time Password (OTP)")', # SBI page heading
+            "context": "page"
+        },
+        # 4. Check for Paytm/Other specific OTP input
+        {
+            "state_name": "BANK_OTP",
+            "selector": 'input#otp[type="tel"]', # Paytm page often uses this
+            "context": "page"
+        },
+        # 5. Check common OTP input patterns within potential payment IFRAMES
+        {
+            "state_name": "BANK_OTP",
+            "selector": 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i], input[placeholder*="otp" i]', # Broad input patterns
+            "context": "iframe",
+            # Added paytm src selector, kept others
+            "iframe_selectors": [
+                'iframe[src*="paytm"]', # Specific to paytm
+                'iframe[id*="card"]',
+                'iframe[name*="card"]',
+                'iframe[title*="3D Secure"]',
+                'iframe[id*="acs"]',
+                'iframe[name*="acs"]',
+                'iframe' # Generic fallback iframe
+            ]
+        },
+        # 6. Check common OTP input patterns on the MAIN PAGE (Lower priority than specific inputs/iframes)
+        {
+            "state_name": "BANK_OTP",
+            "selector": 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i], input[placeholder*="otp" i]', # Broad input patterns
             "context": "page"
         },
         # Add signatures for other page types or OTP variations here
     ]
 
     # Timeout for each individual visibility check (in milliseconds)
-    check_timeout = 3000
+    check_timeout = 5000 # Increased from 3000
     # Timeout for checking if an iframe itself is visible (shorter)
     iframe_visible_timeout = 500
 
@@ -299,6 +332,8 @@ async def detect_page_state(page: Page) -> str:
             if context_type == "page":
                 search_context_msg = "main page"
                 target_locator = page.locator(selector).first
+                print(f"\n>>> Debug: Checking state '{state_name}' (context: {search_context_msg}, selector: '{selector}')")
+                # pdb.set_trace()
                 if await target_locator.is_visible(timeout=check_timeout):
                     print(f"Detected state: {state_name} (in {search_context_msg})")
                     return state_name
@@ -315,9 +350,11 @@ async def detect_page_state(page: Page) -> str:
                             # print(f"  Iframe {iframe_selector} is visible. Checking selector inside...") # Optional
                             frame_context = iframe.frame_locator()
                             target_locator = frame_context.locator(selector).first
+                            search_context_msg = f"iframe ('{iframe_selector}')"
+                            print(f"\n>>> Debug: Checking state '{state_name}' (context: {search_context_msg}, selector: '{selector}')")
+                            # pdb.set_trace()
                             # Check if the target selector is visible within this iframe
                             if await target_locator.is_visible(timeout=check_timeout):
-                                search_context_msg = f"iframe ('{iframe_selector}')"
                                 print(f"Detected state: {state_name} (in {search_context_msg})")
                                 return state_name # Found it, exit early
                         # else: # Optional: log iframe not visible quickly
@@ -348,23 +385,30 @@ async def navigate_and_buy(process_id: str, page: Page, url: str) -> bool:
     """Navigate to product page and click Buy Now."""
     try:
         # Navigate to product URL
+        update_process_status(process_id, "NAVIGATING", f"Navigating to {url}")
         await page.goto(url, wait_until='networkidle', timeout=45000)
-        await page.wait_for_timeout(3000)  # Add a 3-second delay
+        await page.wait_for_timeout(3000) # Allow page to settle
 
-        # Take screenshot
-        screenshot_path = await create_debug_screenshot(page, "product_page")
+        # Take screenshot after navigation
+        screenshot_path = await create_debug_screenshot(page, "product_page_loaded")
         add_process_screenshot(process_id, screenshot_path)
 
         # Try to extract product title
+        product_title = "Unknown"
         try:
             title_locator = page.locator('span.B_NuCI, h1 span._35KyD6')
             if await title_locator.first.is_visible(timeout=10000):
-                product_title = await title_locator.first.text_content()
-                update_process_status(process_id, "NAVIGATING", "Product page loaded", {
-                    "product_title": product_title.strip() if product_title else "Unknown"
-                })
-        except:
-            pass
+                title_text = await title_locator.first.text_content()
+                if title_text:
+                    product_title = title_text.strip()
+            update_process_status(process_id, "NAVIGATING", "Product page loaded", {
+                "product_title": product_title
+            })
+        except Exception as title_ex:
+            print(f"Could not extract product title: {title_ex}")
+            update_process_status(process_id, "NAVIGATING", "Product page loaded (title unknown)", {
+                "product_title": product_title
+            })
 
         # Click Buy Now button
         update_process_status(process_id, "CLICKING_BUY_NOW",
@@ -379,27 +423,37 @@ async def navigate_and_buy(process_id: str, page: Page, url: str) -> bool:
 
         await buy_now_button.click()
 
-        # Wait for navigation
-        await page.wait_for_load_state('networkidle', timeout=25000)
+        # Wait for navigation triggered by the click
+        # Using wait_for_load_state('load') might be more reliable here than networkidle
+        # as checkout pages often have ongoing background requests.
+        print("Waiting for page load after clicking Buy Now...")
+        await page.wait_for_load_state('load', timeout=30000)
+        print(f"Navigation complete after Buy Now. Current URL: {page.url}")
 
-        # Take screenshot after clicking
+        # Take screenshot after clicking and navigation
         screenshot_path = await create_debug_screenshot(page, "after_buy_now_click")
         add_process_screenshot(process_id, screenshot_path)
 
         return True
 
+    except TimeoutError as te:
+        error_msg = f"TimeoutError during navigation or Buy Now click: {te}"
+        print(error_msg)
+        update_process_status(process_id, "ERROR", error_msg)
+        if not page.is_closed():
+            screenshot_path = await create_debug_screenshot(page, "navigation_timeout_error")
+            add_process_screenshot(process_id, screenshot_path)
+        return False
     except Exception as e:
-        update_process_status(process_id, "ERROR",
-                              f"Failed to navigate or click Buy Now: {str(e)}")
-
-        # Try to take screenshot if page is still available
+        error_msg = f"Failed to navigate or click Buy Now: {str(e)}"
+        print(error_msg)
+        update_process_status(process_id, "ERROR", error_msg)
         try:
             if not page.is_closed():
-                screenshot_path = await create_debug_screenshot(page, "navigation_error")
+                screenshot_path = await create_debug_screenshot(page, "navigation_general_error")
                 add_process_screenshot(process_id, screenshot_path)
-        except:
-            pass
-
+        except Exception as ss_err:
+             print(f"Could not take screenshot during navigation error handling: {ss_err}")
         return False
 
 # Main process orchestrator
@@ -408,48 +462,97 @@ async def navigate_and_buy(process_id: str, page: Page, url: str) -> bool:
 async def checkout_process_manager(process_id: str, product_url: str, session_path: Optional[Path] = None):
     """Main function to manage the checkout process."""
     update_process_status(process_id, "INITIALIZING",
-                          "Initializing browser and session")
-
+                          "Initializing browser")
+    browser = None
+    context = None
     try:
         async with async_playwright() as p:
             # Launch browser
-            browser = await p.chromium.launch(headless=False)
+            browser = await p.chromium.launch(headless=False) # Consider headless=True for production
 
             # Create or load context based on session
-            context = None
-
             if session_path and session_path.exists():
                 update_process_status(
                     process_id, "INITIALIZING", f"Loading session from {session_path}")
-                context = await browser.new_context(storage_state=session_path)
+                try:
+                    context = await browser.new_context(storage_state=session_path)
+                    print(f"Session loaded successfully from {session_path}")
+                except Exception as load_err:
+                    print(f"Warning: Failed to load session from {session_path}: {load_err}. Creating new context.")
+                    # Fallback to new context if loading fails
+                    context = await browser.new_context()
             else:
+                if session_path:
+                     print(f"Session file {session_path} not found. Creating new context.")
+                else:
+                     print("No session path provided. Creating new context.")
                 update_process_status(
                     process_id, "INITIALIZING", "Creating new browser context")
                 context = await browser.new_context()
 
-            # Run the checkout process
+            # Run the checkout process, passing the session_path down
             result = await start_purchase_process(process_id, product_url, context, session_path)
 
-            # Save session state if path was provided
-            if session_path:
+            # Save session state if path was provided and process didn't error early
+            if session_path and context and get_process_status(process_id).get("stage") != "ERROR":
                 try:
                     await context.storage_state(path=session_path)
-                    update_process_status(
-                        active_processes[process_id]["stage"],
-                        f"{active_processes[process_id]['message']} (Session saved to {session_path})"
-                    )
+                    print(f"Session state saved to {session_path}")
+                    # Optionally update status
+                    current_status = get_process_status(process_id)
+                    if current_status:
+                         update_process_status(
+                            process_id,
+                            current_status["stage"],
+                            f"{current_status['message']} (Session saved)"
+                         )
                 except Exception as e:
-                    print(f"Error saving session: {e}")
+                    print(f"Error saving session state to {session_path}: {e}")
+                    # Update status to reflect session saving error
+                    current_status = get_process_status(process_id)
+                    if current_status:
+                        update_process_status(
+                            process_id,
+                            current_status["stage"],
+                            f"{current_status['message']} (Error saving session)"
+                        )
 
-            # Keep browser open for inspection
-            await asyncio.sleep(3600)  # Keep browser open for 1 hour
+            # Optional: Keep browser open for inspection only if process completed successfully or needs manual OTP etc.
+            # final_status = get_process_status(process_id)
+            # if final_status and final_status["stage"] in ["COMPLETED", "BANK_OTP_REQUESTED"]:
+            #     print(f"Process ended with state: {final_status['stage']}. Keeping browser open indefinitely.")
+            #     await asyncio.sleep(float('inf')) # Keep open forever
+            # else:
+            #      print(f"Process ended with state: {final_status.get('stage', 'UNKNOWN')}. Keeping browser open.")
+            #      await asyncio.sleep(float('inf')) # Keep open forever
 
-            # Close browser when done
-            await browser.close()
+            print(f"Process finished. Keeping browser open.")
+            await asyncio.sleep(float('inf')) # Keep open forever
+
 
     except Exception as e:
-        update_process_status(process_id, "ERROR",
-                              f"Process manager error: {str(e)}")
+        error_msg = f"Process manager error: {str(e)}"
+        print(error_msg)
+        # Ensure status reflects the manager-level error
+        update_process_status(process_id, "ERROR", error_msg)
+        print("Process encountered an error. Keeping browser open.")
+        await asyncio.sleep(float('inf')) # Keep open on error too
+
+    finally:
+        # Ensure browser and context are closed
+        # if context:
+        #     try:
+        #         await context.close()
+        #         print("Browser context closed.")
+        #     except Exception as ctx_close_err:
+        #         print(f"Error closing browser context: {ctx_close_err}")
+        # if browser:
+        #     try:
+        #         await browser.close()
+        #         print("Browser closed.")
+        #     except Exception as br_close_err:
+        #         print(f"Error closing browser: {br_close_err}")
+        print(f"Checkout process manager finished for process {process_id}. Browser remains open.")
 
 # Handler functions for different checkout stages
 
@@ -884,11 +987,18 @@ async def handle_payment_api(process_id: str, page: Page):
                     # Click the locator we just found
                     await pay_button_to_click.click(timeout=15000)
                     print("Clicked PAY button.")
+                    # NEW: Update status immediately after successful click
+                    update_process_status(
+                        process_id, "PAYMENT_CLICKED", "Pay button clicked, waiting for bank page")
+
                 except Exception as click_err:
                     print(f"Click failed: {click_err}. Attempting force click...")
                     try:
                         await pay_button_to_click.click(force=True, timeout=10000)
                         print("Clicked PAY button (force=True).")
+                        # NEW: Update status immediately after successful force click
+                        update_process_status(
+                            process_id, "PAYMENT_CLICKED", "Pay button clicked (force), waiting for bank page")
                     except Exception as force_click_err:
                         print(f"Force click also failed: {force_click_err}")
                         update_process_status(
@@ -927,9 +1037,11 @@ async def handle_payment_api(process_id: str, page: Page):
             screenshot_path = await create_debug_screenshot(page, "after_payment_submission")
             add_process_screenshot(process_id, screenshot_path)
 
+            # NEW: Update status *after* successful navigation wait
             update_process_status(
-                process_id, "PAYMENT_COMPLETED", "Payment initiated successfully")
-            return True
+                process_id, "PAYMENT_NAVIGATION_COMPLETE", "Navigation to bank page complete")
+
+            return True # Return success, the loop will detect the next state (hopefully BANK_OTP)
         else:
             update_process_status(process_id, "ERROR",
                                   "Payment details missing from process data")
@@ -1013,6 +1125,15 @@ async def handle_bank_otp_api(process_id: str, page: Page):
         add_process_screenshot(process_id, screenshot_path)
         return False
 
+# State to Handler Mapping - Moved here after handlers are defined
+STATE_HANDLERS = {
+    "LOGIN": handle_login_api,
+    "ADDRESS": handle_address_selection_api,
+    "ORDER_SUMMARY": handle_order_summary_api,
+    "PAYMENT": handle_payment_api,
+    "BANK_OTP": handle_bank_otp_api,
+}
+
 # Add the start_purchase_process function that was referenced but not defined
 
 
@@ -1020,9 +1141,11 @@ async def start_purchase_process(
     process_id: str,
     product_url: str,
     browser_context,
-    session_path: Optional[Path] = None
+    session_path: Optional[Path] = None # Keep session_path for potential future use
 ) -> bool:
-    """Start the purchase process and handle all stages."""
+    """Start the purchase process using a state-driven approach."""
+    page = None
+    # Removed initial is_logged_in flag
     try:
         page = await browser_context.new_page()
 
@@ -1030,65 +1153,79 @@ async def start_purchase_process(
         if process_id not in event_locks:
             event_locks[process_id] = asyncio.Event()
 
-        # Navigate and buy
+        # 1. Navigate and click Buy Now
         update_process_status(process_id, "NAVIGATING", "Navigating to product page", {
             "product_url": product_url
         })
-
         navigation_success = await navigate_and_buy(process_id, page, product_url)
         if not navigation_success:
-            update_process_status(
-                process_id, "ERROR", "Failed to navigate to product or click Buy Now")
-            return False
+            return False # navigate_and_buy updates status on failure
 
-        # Check page state and handle each state
-        current_state = await detect_page_state(page)
+        # Initial status after clicking Buy Now (before state detection loop)
+        print(f"Clicked 'Buy Now'. Proceeding to state detection loop.")
+        update_process_status(process_id, "POST_BUY_NOW", "Clicked Buy Now, detecting next step.")
 
-        while current_state not in ["COMPLETED", "ERROR"]:
-            if current_state == "LOGIN":
-                await handle_login_api(process_id, page)
-                current_state = await detect_page_state(page)
+        # --- Main State Handling Loop ---
+        while True:
+            # 2. Detect current page state
+            print(f"\n--- Detecting current state ---")
+            current_state = await detect_page_state(page)
+            print(f"Detected state: {current_state}")
 
-            elif current_state == "ADDRESS":
-                await handle_address_selection_api(process_id, page)
-                current_state = await detect_page_state(page)
-
-            elif current_state == "ORDER_SUMMARY":
-                await handle_order_summary_api(process_id, page)
-                current_state = await detect_page_state(page)
-
-            elif current_state == "PAYMENT":
-                await handle_payment_api(process_id, page)
-                current_state = await detect_page_state(page)
-
-            elif current_state == "BANK_OTP":
-                await handle_bank_otp_api(process_id, page)
-                current_state = await detect_page_state(page)
-
+            # 3. Check for terminal states
+            if current_state == "COMPLETED":
+                update_process_status(process_id, "COMPLETED", "Checkout process completed successfully")
+                return True
+            elif current_state == "ERROR":
+                print("ERROR state detected or handler reported error.")
+                if get_process_status(process_id).get("stage") != "ERROR":
+                    update_process_status(process_id, "ERROR", "Checkout failed in an unknown way.")
+                return False
             elif current_state == "UNKNOWN":
-                # Take screenshot for debugging
-                screenshot_path = await create_debug_screenshot(page, "unknown_state")
+                print("Handling UNKNOWN state...")
+                screenshot_path = await create_debug_screenshot(page, "unknown_state_in_loop")
                 add_process_screenshot(process_id, screenshot_path)
-
-                update_process_status(
-                    process_id, "ERROR", "Cannot determine page state")
+                update_process_status(process_id, "ERROR", f"Cannot determine page state. URL: {page.url}")
                 return False
 
-            # Sleep briefly to prevent CPU hogging
-            await asyncio.sleep(1)
+            # 4. State-specific handling using the dictionary
+            handler_func = STATE_HANDLERS.get(current_state)
 
-        # Final status update
-        if current_state == "COMPLETED":
-            update_process_status(process_id, "COMPLETED",
-                                  "Checkout process completed successfully")
-            return True
-        else:
-            return False
+            if handler_func:
+                print(f"Handling {current_state} state...")
+                success = await handler_func(process_id, page)
+                if not success:
+                    return False # Handler updates status on error
+                print(f"Handler for {current_state} completed successfully.")
+                # Loop continues to re-detect state for the next step
+            else:
+                 # Should not happen if detect_page_state and STATE_HANDLERS are comprehensive
+                 # for known intermediate states.
+                print(f"Error: No handler defined for detected state '{current_state}'. Stopping.")
+                screenshot_path = await create_debug_screenshot(page, f"no_handler_for_{current_state}")
+                add_process_screenshot(process_id, screenshot_path)
+                update_process_status(process_id, "ERROR", f"Internal error: No handler for state '{current_state}'. URL: {page.url}")
+                return False
+
+            # Optional brief sleep
+            # await asyncio.sleep(0.2)
 
     except Exception as e:
-        update_process_status(process_id, "ERROR",
-                              f"An error occurred: {str(e)}")
+        error_message = f"An error occurred in start_purchase_process: {str(e)}"
+        print(error_message)
+        update_process_status(process_id, "ERROR", error_message)
+        if page and not page.is_closed():
+             try:
+                 screenshot_path = await create_debug_screenshot(page, "main_process_exception")
+                 add_process_screenshot(process_id, screenshot_path)
+             except Exception as ss_err:
+                 print(f"Failed to take screenshot during exception handling: {ss_err}")
         return False
+    finally:
+        if process_id in event_locks:
+            if not event_locks[process_id].is_set():
+                event_locks[process_id].set()
+            del event_locks[process_id]
 
 
 async def terminate_process(process_id: str) -> bool:
