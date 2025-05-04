@@ -226,33 +226,77 @@ async def submit_payment_details(
     return True
 
 
-# --- Add Gemini Helper ---
-async def call_gemini_vision(image_bytes: bytes, prompt: str) -> Optional[Dict[str, str]]:
-    """Sends an image and prompt to Gemini Vision Pro and returns the parsed JSON response."""
+async def provide_bank_otp(process_id: str, bank_otp: str) -> bool:
+    """Receives the bank OTP via API and signals the waiting process."""
+    if process_id not in active_processes or active_processes[process_id]["stage"] != "BANK_OTP_REQUESTED":
+        print(
+            f"[provide_bank_otp] Process {process_id} not found or not in BANK_OTP_REQUESTED stage. Current stage: {active_processes.get(process_id, {}).get('stage')}")
+        return False
+
+    if process_id not in event_locks:
+        print(f"[provide_bank_otp] Event lock not found for process {process_id}")
+        return False
+
+    # Store bank OTP in process data
+    update_process_status(process_id, "BANK_OTP_SUBMITTED", "Bank OTP received via API, processing...", {
+        "bank_otp": bank_otp # Store the OTP
+    })
+
+    # Set the event to resume the checkout process
+    event_locks[process_id].set()
+    print(f"[provide_bank_otp] Event set for process {process_id}")
+    return True
+
+
+# --- HTML Cleaning Helper ---
+def clean_html(html_content: str) -> str:
+    """Removes script tags, style tags, CSS links, and comments from HTML content."""
+    # Remove script tags and their content
+    html_content = re.sub(r'<script.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    # Remove style tags and their content
+    html_content = re.sub(r'<style.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    # Remove link tags for stylesheets
+    html_content = re.sub(r'<link[^>]*rel=["\']stylesheet["\'][^>]*>', '', html_content, flags=re.IGNORECASE)
+    # Remove HTML comments
+    html_content = re.sub(r'<!--.*?-->', '', html_content, flags=re.DOTALL)
+    # Optional: remove noscript tags
+    html_content = re.sub(r'<noscript.*?</noscript>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    # Optional: condense multiple whitespaces
+    html_content = re.sub(r'\s+', ' ', html_content).strip()
+    return html_content
+
+
+# --- Gemini Helper ---
+async def call_gemini_for_selectors(html_content: str, prompt: str) -> Optional[Dict[str, str]]:
+    """Sends HTML content and prompt to Gemini and returns the parsed JSON response with selectors."""
     if not GEMINI_API_KEY:
         print("Error: Gemini API key not configured. Cannot use vision features.")
         return None
 
     try:
-        print("Calling Gemini Vision API...")
-        model = genai.GenerativeModel('gemini-pro-vision')
-        image_part = {"mime_type": "image/png", "data": image_bytes}
+        print("Calling Gemini API with HTML content...")
+        # Using gemini-1.5-flash which is suitable for text/code analysis
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
+        # Combine prompt and HTML for the model input
+        # Ensure HTML is clearly delineated for the model
+        full_prompt = f"{prompt}\n\nHere is the cleaned HTML content of the page:\n```html\n{html_content}\n```"
+
         response = await asyncio.to_thread(
             model.generate_content,
-            [prompt, image_part]
+            [full_prompt] # Send the combined prompt and HTML as text
         )
 
-        # Attempt to parse the response as JSON
+        # Attempt to parse the response as JSON (same logic as before)
         try:
             # Clean the response text before parsing
             cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-            print(f"Gemini Raw Response Text:\n{response.text}") # Log raw response
-            print(f"Cleaned Text for JSON parsing:\n{cleaned_text}")
+            print(f"Gemini Raw Response Text:\\n{response.text}") # Log raw response
+            print(f"Cleaned Text for JSON parsing:\\n{cleaned_text}")
             result = json.loads(cleaned_text)
             print(f"Gemini Parsed JSON Response: {result}")
             # Basic validation
             if isinstance(result, dict) and "otp_input_selector" in result and "submit_button_selector" in result:
-                 # Optionally add context check: and "context" in result and result["context"] in ["page", "iframe"]
                 return result
             else:
                 print(f"Error: Gemini response missing required keys or invalid structure: {result}")
@@ -267,7 +311,13 @@ async def call_gemini_vision(image_bytes: bytes, prompt: str) -> Optional[Dict[s
             return None
 
     except Exception as e:
-        print(f"Error calling Gemini Vision API: {e}")
+        # Catch potential API errors specifically if possible
+        # Example: Check for specific error types from the genai library if available
+        # if isinstance(e, genai.APIError) and e.status_code == 404: # Fictional example
+        #     print(f"Error calling Gemini API: Model not found or API endpoint issue - {e}")
+        # else:
+        #     print(f"Error calling Gemini API: {e}") # General error
+        print(f"Error calling Gemini API: {e}")
         return None
 
 
@@ -300,21 +350,33 @@ async def handle_bank_otp_gemini(process_id: str, page: Page):
     bank_otp = active_processes[process_id]["data"]["bank_otp"]
     print(f"Retrieved Bank OTP. Asking Gemini to find elements...")
 
-    # 2. Get Screenshot for Gemini
+    # 2. Get Page HTML for Gemini
     try:
-        # Take screenshot again *after* OTP is available, in case page changed slightly
-        screenshot_bytes = await page.screenshot()
-        screenshot_path_gemini = await create_debug_screenshot(page, "bank_otp_for_gemini")
-        add_process_screenshot(process_id, screenshot_path_gemini)
-    except Exception as ss_err:
-        update_process_status(process_id, "ERROR", f"Failed to take screenshot for Gemini: {ss_err}")
+        print("Getting page HTML content...")
+        html_content = await page.content()
+        print("Cleaning HTML content...")
+        cleaned_html = clean_html(html_content)
+        # Optional: Log cleaned HTML length or snippet for debugging
+        print(f"Cleaned HTML length: {len(cleaned_html)}")
+        # Limit logging very large HTML
+        # print(f"Cleaned HTML (first 500 chars): {cleaned_html[:500]}")
+        # Save cleaned HTML for debugging if needed
+        # debug_html_path = debug_images_dir / f"{process_id}_bank_otp_cleaned.html"
+        # with open(debug_html_path, "w") as f:
+        #     f.write(cleaned_html)
+        # print(f"Saved cleaned HTML to {debug_html_path}")
+
+    except Exception as html_err:
+        update_process_status(process_id, "ERROR", f"Failed to get or clean page HTML: {html_err}")
         return False
 
-    # 3. Call Gemini Vision
+    # 3. Call Gemini with HTML
     prompt = """
-Analyze this bank OTP page screenshot. Identify the CSS selectors for the following elements:
-1.  The primary input field where the user should type the One-Time Password (OTP).
-2.  The main confirmation or submit button to click after entering the OTP (e.g., "Submit", "Confirm", "Pay").
+Analyze the following cleaned HTML content from a bank OTP page. Identify the CSS selectors for:
+1.  The primary input field for the One-Time Password (OTP).
+2.  The main confirmation or submit button (e.g., "Submit", "Confirm", "Pay").
+
+Please focus on standard form elements like <input> and <button>.
 
 Return the response ONLY as a JSON object with the following keys:
 - "otp_input_selector": The CSS selector for the OTP input field.
@@ -328,8 +390,9 @@ Example:
 
 If you cannot confidently identify one or both selectors, return null for that key.
 """
-    gemini_result = await call_gemini_vision(screenshot_bytes, prompt)
+    gemini_result = await call_gemini_for_selectors(cleaned_html, prompt)
 
+    print(f"Gemini Result: {gemini_result}")
     # 4. Process Gemini Response
     if not gemini_result or not gemini_result.get("otp_input_selector") or not gemini_result.get("submit_button_selector"):
         print("Error: Gemini failed to provide valid selectors. Cannot proceed with OTP submission.")

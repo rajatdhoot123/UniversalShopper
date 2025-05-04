@@ -13,6 +13,7 @@ from typing import Dict, Optional, List, Any
 
 # Import our bot module
 from flipkart_bot_api import (
+    provide_bank_otp,
     get_active_processes,
     submit_login_otp,
     select_address,
@@ -263,7 +264,7 @@ async def handle_payment(process_id: str, payment_request: PaymentDetailsRequest
 @app.post("/process/{process_id}/bank-otp", response_model=StatusResponse)
 async def handle_bank_otp(process_id: str, bank_otp_request: BankOTPRequest):
     """Submit bank OTP"""
-    success = await submit_bank_otp(process_id, bank_otp_request.otp)
+    success = await provide_bank_otp(process_id, bank_otp_request.otp)
     if not success:
         return JSONResponse(
             status_code=404,

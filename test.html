@@ -1,0 +1,415 @@
+<body>
+  <div class="container">
+    <div class="header">
+      <img
+        class="left__logo"
+        id="renderImage"
+        src="https://accosa-ivs.s3.ap-south-1.amazonaws.com/accosa-ivs/v1/participant/sbicb/images/sbicb_logo.jpg"
+      />
+      <img
+        class="right__logo"
+        id="leftLogo"
+        src="https://accosa-ivs.s3.ap-south-1.amazonaws.com/accosa-ivs/v1/emv/mastercard/images/mastercard_logo.jpg"
+        style="height: 45px"
+      />
+      <div class="clear_both"></div>
+    </div>
+    <div class="sub-header-set">
+      <h1>Complete Payment of Rs. 6103.00</h1>
+      <a
+        href="https://www.sbicard.com/sbi-card-en/assets/docs/html/images/WIBMODynamicOTP/otp_email_faq.html"
+        target="_blank"
+        class="help__btn"
+      >
+        <img
+          src="https://accosa-ivs.s3.ap-south-1.amazonaws.com/accosa-ivs/v1/participant/sbicb/images/help.png"
+          alt="help icon"
+        />
+        Help
+      </a>
+      <div class="clear_both"></div>
+    </div>
+    <div class="content">
+      <div class="merchant_details">
+        <h2 class="sub__header">Merchant Details</h2>
+        <div class="merchant_details__info">
+          <div class="merchant_details__info__table">
+            <label>Merchant Name</label>
+            <label class="bold__text">FLIPKART PAYMENTS</label>
+            <div class="clear_both"></div>
+          </div>
+
+          <div class="merchant_details__info__table">
+            <label>Amount</label>
+            <label class="bold__text">
+              <span>Rs.</span>
+              <span>6103.00</span>
+            </label>
+            <div class="clear_both"></div>
+          </div>
+
+          <div class="merchant_details__info__table">
+            <label>Date</label>
+            <label class="bold__text" id="DateTime">04:05:2025</label>
+            <div class="clear_both"></div>
+          </div>
+
+          <div class="merchant_details__info__table">
+            <label>Card Number</label>
+            <label class="bold__text">5172 XXXX XXXX 4078</label>
+            <div class="clear_both"></div>
+          </div>
+        </div>
+      </div>
+      <div class="content_details">
+        <form name="myForm" method="post">
+          <h2 class="sub__header">Enter One Time Password (OTP)</h2>
+          <p class="sub__line">
+            Enter One Time Password (OTP) for secured online transaction.
+          </p>
+          <div class="otp-box" id="otpBox">
+            <input
+              class="otp__input"
+              type="password"
+              name="otpValue"
+              id="otpValue"
+              placeholder="Enter OTP"
+              maxlength="6"
+              onkeypress="return isNumber(event)"
+              inputmode="numeric"
+              pattern="[0-9]*"
+            />
+            <span>
+              <img
+                src="https://accosa-ivs.s3.ap-south-1.amazonaws.com/accosa-ivs/v1/participant/sbicb/images/errorIcon.png"
+                alt="error icon"
+              />
+            </span>
+          </div>
+          <button
+            class="secondary__btn btn"
+            type="button"
+            id="otpResend"
+            onclick="resendOTP()"
+            style="color: rgb(0, 149, 217)"
+          >
+            Resend OTP
+          </button>
+          <div class="default-message">
+            <p>
+              <span style="display: inline"
+                >OTP has been sent to card holder’s registered Mobile Number
+                ending with <b>0383</b></span
+              ><span id="coma" style="display: none; padding-right: 4px">,</span
+              ><span id="andText1" style="display: inline; padding: 0px 4px"
+                >and</span
+              ><span id="intlMobile" style="display: none"
+                >International mobile number ending with <b></b></span
+              ><span id="andText2" style="display: none; padding: 0 4px"
+                >and</span
+              ><span id="emailText" style="display: inline"
+                >e-mail ID <b>ANXXXXXXXXXX@GMAIL.COM</b></span
+              ><span>.</span>
+            </p>
+          </div>
+          <div class="btn-set">
+            <button
+              class="primary__btn btn"
+              id="submitBtn"
+              type="submit"
+              disabled="true"
+              onclick="otpSubmit()"
+              style="
+                background-color: rgb(187, 187, 187);
+                color: rgb(139, 139, 139);
+              "
+            >
+              Submit
+            </button>
+            <button class="border__withicon__btn btn" onclick="cancel()">
+              Cancel
+            </button>
+          </div>
+
+          <input
+            type="hidden"
+            name="creq"
+            value="eyJtZXNzYWdlVHlwZSI6IkNSZXEiLCJtZXNzYWdlVmVyc2lvbiI6IjIuMi4wIiwidGhyZWVEU1NlcnZlclRyYW5zSUQiOiI5MzhkYjUxZS1kNmViLTRmNzItYmNhZC1jZmJkNzllMTA0OTkiLCJhY3NUcmFuc0lEIjoiNDAwN2NlODctMjhhYS0xMWYwLThiNzItM2Q3ZDg4NjE0M2IzIiwiY2hhbGxlbmdlV2luZG93U2l6ZSI6IjAyIn0"
+          />
+          <input type="hidden" name="acctId" value="" />
+          <input type="hidden" name="formReqType" />
+          <img
+            style="display: none"
+            src="https://secure-acs2ui-b4-indche-chnmdc.wibmo.com/v1/acs/services/browser/tracking/L/8198/T~OTP_PAGE/4007ce87-28aa-11f0-8b72-3d7d886143b3"
+          />
+        </form>
+      </div>
+      <div class="clear_both"></div>
+    </div>
+    <div class="footer">
+      <p>
+        This screen will automatically time out after
+        <span id="timerCount">9:41</span> seconds
+      </p>
+    </div>
+    <div class="powered">
+      <img
+        src="https://s3.ap-south-1.amazonaws.com/in-mum-wibmo-acs/static/common/images/wbmo.png"
+      />
+    </div>
+  </div>
+
+  <script>
+    function incorrectOTP() {
+      var otpBox = document.getElementById("otpBox");
+      otpBox.classList.add("error");
+      document.getElementsByClassName("secondary__btn")[0].style.paddingRight =
+        "27px";
+    }
+
+    // DATE AND TIME 08-06-2022 START
+    var today = new Date();
+    var dd = today.getDate();
+    var mm = today.getMonth() + 1;
+    var yyyy = today.getFullYear();
+
+    if (dd < 10) {
+      dd = "0" + dd;
+    }
+    if (mm < 10) {
+      mm = "0" + mm;
+    }
+
+    var dateStr = dd + ":" + mm + ":" + yyyy;
+
+    var dateTimeElement = document.getElementById("DateTime");
+    if (dateTimeElement) {
+      dateTimeElement.innerHTML = dateStr;
+    }
+
+    // DATE AND TIME 08-06-2022 END
+    function isNumber(evt) {
+      evt = evt ? evt : window.event;
+      var charCode = evt.which ? evt.which : evt.keyCode;
+      if (charCode > 31 && (charCode < 48 || charCode > 57)) {
+        return false;
+      }
+      return true;
+    }
+    function timeOutCunt(pageTimeoutValue) {
+      var TIME_LIMIT = pageTimeoutValue * 60;
+      var timeLeft = TIME_LIMIT;
+      var timerInterval = null;
+      function onTimesUp() {
+        clearInterval(timerInterval);
+        timedOut();
+      }
+      function startTimer() {
+        timerInterval = setInterval(function () {
+          timeLeft -= 1;
+          var timerCountElement = document.getElementById("timerCount");
+          if (timerCountElement) {
+            timerCountElement.innerHTML = formatTime(timeLeft);
+          }
+          console.log(timeLeft);
+
+          if (timeLeft === 0) {
+            onTimesUp();
+          }
+        }, 1000);
+      }
+      function formatTime(time) {
+        var minutes = Math.floor(time / 60);
+        var seconds = (time % 60).toString();
+        if (seconds.length === 1) {
+          seconds = "0" + seconds;
+        }
+        return minutes + ":" + seconds;
+      }
+
+      if (pageTimeoutValue) {
+        startTimer();
+      }
+    }
+
+    var pageValue = "10";
+    //var pageValue = "5";
+    var pageTimeout = parseInt(pageValue, 10);
+    timeOutCunt(pageTimeout);
+    function timedOut() {
+      document.forms["myForm"]["formReqType"].value = "TIMEOUT_PAGE";
+      document.forms["myForm"].action =
+        "https://secure-acs2ui-b4-indche-chnmdc.wibmo.com/v1/acs/services/browser/creq/L/8198/4007ce87-28aa-11f0-8b72-3d7d886143b3";
+      document.forms["myForm"].submit();
+    }
+
+    var counter = "5";
+    if (counter >= 1) {
+      document.getElementById("otpResend").disabled = false;
+      document.getElementById("otpResend").style.color = "#0095d9";
+    } else {
+      document.getElementById("otpResend").disabled = true;
+      document.getElementById("otpResend").style.color = "#bbb";
+    }
+
+    var otpValueText = document.getElementById("otpValue");
+    var submitBtn = document.getElementById("submitBtn");
+
+    otpValueText.addEventListener("input", checkOtp);
+    function checkOtp() {
+      if (otpValueText.value.length >= 6) {
+        submitBtn.style.backgroundColor = "#0095d9";
+        submitBtn.style.color = "#ffffff";
+        submitBtn.disabled = false;
+      } else {
+        submitBtn.style.backgroundColor = "#BBB";
+        submitBtn.style.color = "#8b8b8b";
+        submitBtn.disabled = true;
+      }
+    }
+    function otpSubmit() {
+      document.forms["myForm"]["formReqType"].value = "SUBMIT";
+      document.forms["myForm"].action =
+        "https://secure-acs2ui-b4-indche-chnmdc.wibmo.com/v1/acs/services/browser/creq/L/8198/4007ce87-28aa-11f0-8b72-3d7d886143b3";
+      document.forms["myForm"].submit();
+    }
+    function cancel() {
+      document.forms["myForm"]["formReqType"].value = "CANCEL";
+      document.forms["myForm"].action =
+        "https://secure-acs2ui-b4-indche-chnmdc.wibmo.com/v1/acs/services/browser/creq/L/8198/4007ce87-28aa-11f0-8b72-3d7d886143b3";
+      document.forms["myForm"].submit();
+    }
+    function resendOTP() {
+      document.forms["myForm"]["formReqType"].value = "RESEND";
+      document.forms["myForm"].action =
+        "https://secure-acs2ui-b4-indche-chnmdc.wibmo.com/v1/acs/services/browser/creq/L/8198/4007ce87-28aa-11f0-8b72-3d7d886143b3";
+      document.forms["myForm"].submit();
+    }
+    function changeBtn1() {
+      document.getElementById("okContinue").innerHTML = "Ok";
+    }
+    function changeBtn2() {
+      document.getElementById("okContinue").innerHTML = "Continue";
+    }
+
+    //Challenge Info Text Content Modification Start
+    var mobileNumber = "0383";
+    console.log("mobileNumber", mobileNumber);
+
+    var intlMobileNumberValue = "";
+    var intlMobileNumber = intlMobileNumberValue.trim();
+    console.log("intlMobileNumber", intlMobileNumber);
+
+    var emailIdValue = "ANXXXXXXXXXX@GMAIL.COM";
+
+    var emailSuppress = "false";
+    console.log("emailSuppress", emailSuppress);
+    //var emailSuppress = "false";
+
+    if (emailSuppress == "true") {
+      emailIdValue = "";
+    }
+    var emailId = emailIdValue.trim();
+    console.log("emailId", emailId);
+
+    var comaDisplay = document.getElementById("coma");
+    var andText1Dispaly = document.getElementById("andText1");
+    var intlMobileDisplay = document.getElementById("intlMobile");
+    var andText2Dispaly = document.getElementById("andText2");
+    var emailIdDisplay = document.getElementById("emailText");
+
+    if (mobileNumber && intlMobileNumber && !emailId) {
+      if (andText1Dispaly != null && intlMobileDisplay != null) {
+        andText1Dispaly.style.display = "inline";
+        intlMobileDisplay.style.display = "inline";
+      }
+    }
+    if (mobileNumber && !intlMobileNumber && emailId) {
+      if (andText1Dispaly != null && emailIdDisplay != null) {
+        andText1Dispaly.style.display = "inline";
+        emailIdDisplay.style.display = "inline";
+      }
+    }
+    if (mobileNumber && intlMobileNumber && emailId) {
+      if (
+        comaDisplay != null &&
+        intlMobileDisplay != null &&
+        andText2Dispaly != null &&
+        emailIdDisplay != null
+      ) {
+        comaDisplay.style.display = "inline";
+        intlMobileDisplay.style.display = "inline";
+        andText2Dispaly.style.display = "inline";
+        emailIdDisplay.style.display = "inline";
+      }
+    }
+    //Challenge Info Text Content Modification End
+
+    var visaLogo =
+      "https://accosa-ivs.s3.ap-south-1.amazonaws.com/accosa-ivs/v1/emv/visa/images/visa_logo.jpg";
+    var mastercardLogo =
+      "https://accosa-ivs.s3.ap-south-1.amazonaws.com/accosa-ivs/v1/emv/mastercard/images/mastercard_logo.jpg";
+    var amexLogo =
+      "https://accosa-ivs.s3.ap-south-1.amazonaws.com/accosa-ivs/v1/emv/amex/images/amex_logo.jpg";
+
+    var logoDisplay = document.getElementById("leftLogo");
+    var logoDisplayValue = logoDisplay.src;
+
+    if (visaLogo == logoDisplayValue) {
+      logoDisplay.style.height = "25px";
+    }
+    if (mastercardLogo == logoDisplayValue) {
+      logoDisplay.style.height = "45px";
+    }
+    if (amexLogo == logoDisplayValue) {
+      logoDisplay.style.height = "55px";
+    }
+  </script>
+
+  <script>
+    (function () {
+      function c() {
+        var b = a.contentDocument || a.contentWindow.document;
+        if (b) {
+          var d = b.createElement("script");
+          d.innerHTML =
+            "window.__CF$cv$params={r:'93a5a982d95fc151',t:'MTc0NjMzNzIxNC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";
+          b.getElementsByTagName("head")[0].appendChild(d);
+        }
+      }
+      if (document.body) {
+        var a = document.createElement("iframe");
+        a.height = 1;
+        a.width = 1;
+        a.style.position = "absolute";
+        a.style.top = 0;
+        a.style.left = 0;
+        a.style.border = "none";
+        a.style.visibility = "hidden";
+        document.body.appendChild(a);
+        if ("loading" !== document.readyState) c();
+        else if (window.addEventListener)
+          document.addEventListener("DOMContentLoaded", c);
+        else {
+          var e = document.onreadystatechange || function () {};
+          document.onreadystatechange = function (b) {
+            e(b);
+            "loading" !== document.readyState &&
+              ((document.onreadystatechange = e), c());
+          };
+        }
+      }
+    })();
+  </script>
+  <iframe
+    height="1"
+    width="1"
+    style="
+      position: absolute;
+      top: 0px;
+      left: 0px;
+      border: none;
+      visibility: hidden;
+    "
+  ></iframe>
+</body>
