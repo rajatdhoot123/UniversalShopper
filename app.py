@@ -126,6 +126,21 @@ async def start_process(request: ProductRequest, background_tasks: BackgroundTas
             # checking if it exists or creating it
             session_path = str(sessions_dir / f"{request.session_name}.json")
             
+            # Create an empty session file immediately if it doesn't exist
+            # The checkout_process_manager will populate it later upon login.
+            try:
+                with open(session_path, 'x') as f:
+                    json.dump({}, f) # Create an empty JSON object
+                print(f"Created initial empty session file: {session_path}")
+            except FileExistsError:
+                # If the file exists and use_existing_session is false, 
+                # it will be overwritten by checkout_process_manager later.
+                # If use_existing_session is true, we check below.
+                pass 
+            except Exception as e:
+                # Handle other potential file system errors
+                print(f"Warning: Could not create initial session file {session_path}: {e}")
+
             # Inform if we're using existing or creating new
             if request.use_existing_session and not Path(session_path).exists():
                 return JSONResponse(
