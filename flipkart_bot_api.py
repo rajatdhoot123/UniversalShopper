@@ -9,6 +9,16 @@ from typing import Dict, List, Optional, Any, Union
 import time
 from datetime import datetime
 import pdb
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+# Configure Gemini API Key
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("Warning: GEMINI_API_KEY environment variable not set. Gemini vision features will be disabled.")
 
 # Create debug images directory
 debug_images_dir = Path("debug_images")
@@ -44,6 +54,7 @@ PROCESS_STATES = {
 event_locks = {}
 
 # State to Handler Mapping definition moved below handler functions
+
 
 async def create_or_load_session(session_path: Optional[Path] = None) -> Path:
     """Create a new session or load an existing one."""
@@ -139,71 +150,6 @@ def add_process_screenshot(process_id: str, screenshot_path: str):
 # Functions for handling user inputs
 
 
-# --- New Helper Function for AI Selector ---
-async def get_button_selector_from_ai(html_content: str) -> Optional[str]:
-    """
-    Sends HTML content to an AI model via OpenRouter to get a CSS selector
-    for the primary action button (e.g., Submit, Confirm, Pay) on an OTP page.
-    """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        print("Error: OPENROUTER_API_KEY environment variable not set.")
-        return None
-
-    api_url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    # Simple prompt asking for the selector of the main submit button
-    prompt = f"""Given the following HTML content from a bank OTP verification page, please provide the most likely CSS selector for the single button used to submit the OTP (e.g., 'Submit', 'Confirm', 'Pay'). Only return the CSS selector string, nothing else. If you cannot confidently determine the selector, return 'None'.
-
-HTML:
-```html
-{html_content[:15000]}
-```
-
-CSS Selector:""" # Limit HTML size to avoid overly large requests
-
-    payload = {
-        "model": "deepseek/deepseek-r1-distill-qwen-14b:free", # Using the model from the example
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "max_tokens": 50 # Limit response size
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, headers=headers, json=payload, timeout=30) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    ai_response = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                    # Basic validation: check if it looks like a selector and isn't 'None'
-                    if ai_response and ai_response != 'None' and ('#' in ai_response or '.' in ai_response or '[' in ai_response or ':' in ai_response or re.match(r'^[a-zA-Z0-9_ >\-\*]+$', ai_response)):
-                        print(f"AI suggested selector: {ai_response}")
-                        return ai_response
-                    else:
-                        print(f"AI did not provide a valid selector. Response: '{ai_response}'")
-                        return None
-                else:
-                    print(f"Error calling OpenRouter API: Status {response.status}, Response: {await response.text()}")
-                    return None
-    except aiohttp.ClientConnectorError as e:
-        print(f"Network error calling OpenRouter API: {e}")
-        return None
-    except asyncio.TimeoutError:
-        print("Timeout calling OpenRouter API.")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred during AI selector fetch: {e}")
-        return None
-# --- End New Helper Function ---
-
-
 async def submit_login_otp(process_id: str, otp: str) -> bool:
     """Submit OTP for login."""
     if process_id not in active_processes or active_processes[process_id]["stage"] != "OTP_REQUESTED":
@@ -280,282 +226,187 @@ async def submit_payment_details(
     return True
 
 
-async def handle_bank_otp_api(process_id: str, page: Page):
-    """Handle the bank OTP verification page, using AI to find the submit button."""
-    # Default Selectors (will be overridden by AI if successful)
-    otp_input_selector = 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i], input:near(:text("Enter your code"))'
-    default_confirm_button_selector = 'button:text-matches("CONFIRM|SUBMIT|PAY", "i"), input[type="submit"]:text-matches("CONFIRM|SUBMIT|PAY", "i")'
-    # Removed iframe selectors
+# --- Add Gemini Helper ---
+async def call_gemini_vision(image_bytes: bytes, prompt: str) -> Optional[Dict[str, str]]:
+    """Sends an image and prompt to Gemini Vision Pro and returns the parsed JSON response."""
+    if not GEMINI_API_KEY:
+        print("Error: Gemini API key not configured. Cannot use vision features.")
+        return None
 
     try:
-        # Take screenshot of bank OTP page
-        screenshot_path = await create_debug_screenshot(page, "bank_otp_page")
-        add_process_screenshot(process_id, screenshot_path)
+        print("Calling Gemini Vision API...")
+        model = genai.GenerativeModel('gemini-pro-vision')
+        image_part = {"mime_type": "image/png", "data": image_bytes}
+        response = await asyncio.to_thread(
+            model.generate_content,
+            [prompt, image_part]
+        )
 
-        # Use page context directly
-        context_locator = page
-        print("Using context: page")
-
-        # Wait for OTP input field
-        otp_input = context_locator.locator(otp_input_selector).first
-        print(f"Waiting for OTP input field using selector: '{otp_input_selector}'")
-        await otp_input.wait_for(state='visible', timeout=45000)
-        print("OTP input field found.")
-
-        # --- AI Button Selector Logic ---
-        print("Attempting to get button selector from AI...")
-        html_content = await page.content()
-        dynamic_selector = await get_button_selector_from_ai(html_content)
-
-        confirm_button_selector = default_confirm_button_selector # Start with default
-        if dynamic_selector:
-            print(f"Using AI-provided selector: '{dynamic_selector}'")
-            confirm_button_selector = dynamic_selector
-        else:
-            print(f"AI failed or didn't provide a selector. Using default: '{default_confirm_button_selector}'")
-        # --- End AI Button Selector Logic ---
-
-
-        # Update process status requesting bank OTP
-        update_process_status(process_id, "BANK_OTP_REQUESTED",
-                              "Please provide bank OTP via API")
-
-        # Wait for bank OTP via API
-        if process_id not in event_locks:
-            event_locks[process_id] = asyncio.Event()
-
-        print("Waiting for Bank OTP submission via API...")
-        await event_locks[process_id].wait()
-        event_locks[process_id].clear()  # Reset for next wait
-        print("Received signal for Bank OTP submission.")
-
-
-        # Get bank OTP from process data
-        if "bank_otp" in active_processes[process_id]["data"]:
-            bank_otp = active_processes[process_id]["data"]["bank_otp"]
-            print(f"Retrieved Bank OTP from process data.")
-
-
-            # Fill OTP
-            print(f"Filling OTP input with received OTP...")
-            await otp_input.fill(bank_otp)
-            await page.wait_for_timeout(1000) # Short pause after filling
-            print("OTP filled.")
-
-
-            # Take screenshot after filling OTP
-            screenshot_path = await create_debug_screenshot(page, "after_bank_otp_fill")
-            add_process_screenshot(process_id, screenshot_path)
-
-            # Locate and click the confirm button using the determined selector
-            print(f"Locating confirm button using selector: '{confirm_button_selector}'")
-            confirm_button = context_locator.locator(confirm_button_selector).first
-
-            print("Waiting for confirm button to be visible/enabled...")
-            # Wait for button to be potentially clickable (visible/enabled)
-            try:
-                 await confirm_button.wait_for(state='visible', timeout=15000)
-                 print("Confirm button is visible. Attempting click...")
-                 await confirm_button.click(timeout=10000) # Click with timeout
-                 print("Clicked confirm button.")
-            except TimeoutError:
-                 print("Confirm button was not visible/enabled within timeout. Attempting force click...")
-                 try:
-                    await confirm_button.click(force=True, timeout=10000)
-                    print("Clicked confirm button (force=True).")
-                 except Exception as force_click_err:
-                     print(f"Force click also failed: {force_click_err}")
-                     update_process_status(process_id, "ERROR", f"Failed to click confirm OTP button: {str(force_click_err)}")
-                     screenshot_path_click_error = await create_debug_screenshot(page, "bank_otp_confirm_click_error")
-                     add_process_screenshot(process_id, screenshot_path_click_error)
-                     return False
-            except Exception as click_err:
-                 print(f"Error clicking confirm button: {click_err}")
-                 update_process_status(process_id, "ERROR", f"Error clicking confirm OTP button: {str(click_err)}")
-                 screenshot_path_click_error = await create_debug_screenshot(page, "bank_otp_confirm_click_error")
-                 add_process_screenshot(process_id, screenshot_path_click_error)
-                 return False
-
-
-            # Wait for final confirmation/redirect
-            print("Waiting for page navigation/load after submitting bank OTP...")
-            await page.wait_for_load_state('networkidle', timeout=90000)
-            print("Navigation/load complete after bank OTP submission.")
-
-
-            # Take screenshot of final confirmation
-            screenshot_path = await create_debug_screenshot(page, "final_confirmation")
-            add_process_screenshot(process_id, screenshot_path)
-
-            # Check final URL / content for success confirmation (Optional but recommended)
-            final_url = page.url
-            print(f"Final URL after bank OTP: {final_url}")
-            # TODO: Add logic here to check if final_url indicates success or failure
-
-            update_process_status(process_id, "COMPLETED",
-                                  "Order completed successfully (pending final verification)") # Adjusted message
-            return True
-        else:
-            update_process_status(process_id, "ERROR",
-                                  "Bank OTP missing from process data after waiting") # Adjusted message
-            return False
+        # Attempt to parse the response as JSON
+        try:
+            # Clean the response text before parsing
+            cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
+            print(f"Gemini Raw Response Text:\n{response.text}") # Log raw response
+            print(f"Cleaned Text for JSON parsing:\n{cleaned_text}")
+            result = json.loads(cleaned_text)
+            print(f"Gemini Parsed JSON Response: {result}")
+            # Basic validation
+            if isinstance(result, dict) and "otp_input_selector" in result and "submit_button_selector" in result:
+                 # Optionally add context check: and "context" in result and result["context"] in ["page", "iframe"]
+                return result
+            else:
+                print(f"Error: Gemini response missing required keys or invalid structure: {result}")
+                return None
+        except json.JSONDecodeError as json_err:
+            print(f"Error: Failed to parse Gemini response as JSON. Error: {json_err}")
+            print(f"Gemini Raw Text was: {response.text}")
+            return None
+        except Exception as parse_err:
+            print(f"Error: Unexpected error parsing Gemini response: {parse_err}")
+            print(f"Gemini Raw Text was: {response.text}")
+            return None
 
     except Exception as e:
-        error_msg = f"Error during bank OTP processing: {str(e)}"
-        print(error_msg)
-        update_process_status(process_id, "ERROR", error_msg)
-        try: # Ensure screenshot happens even if page context is invalid later
-            if page and not page.is_closed():
-                screenshot_path = await create_debug_screenshot(page, "bank_otp_error")
-                add_process_screenshot(process_id, screenshot_path)
-        except Exception as ss_err:
-            print(f"Could not take screenshot during bank OTP error handling: {ss_err}")
+        print(f"Error calling Gemini Vision API: {e}")
+        return None
+
+
+async def handle_bank_otp_gemini(process_id: str, page: Page):
+    """Handle the bank OTP verification page using Gemini Vision API."""
+    print("--- Handling Bank OTP via Gemini Vision ---")
+    if not GEMINI_API_KEY:
+        print("Gemini API key not set. Falling back to multi-attempt logic.")
+        # Fallback (optional, or just error out)
+        # return await handle_bank_otp_multi_attempt(process_id, page)
+        update_process_status(process_id, "ERROR", "Gemini API key not configured for Bank OTP step.")
         return False
 
-# Page state detection
+    # 1. Update Status & Wait for OTP via API (Common part)
+    update_process_status(process_id, "BANK_OTP_REQUESTED", "Please provide bank OTP via API (Using Gemini Vision)")
+    screenshot_path = await create_debug_screenshot(page, "bank_otp_request_gemini")
+    add_process_screenshot(process_id, screenshot_path)
 
+    if process_id not in event_locks:
+        event_locks[process_id] = asyncio.Event()
 
-async def detect_page_state(page: Page) -> str:
-    """Detect the current page state using a structured approach for extensibility."""
+    print("Waiting for Bank OTP submission via API...")
+    await event_locks[process_id].wait()
+    event_locks[process_id].clear()
+    print("Received signal for Bank OTP submission.")
 
-    # Define page signatures in order of priority
-    page_signatures = [
-        # Highest priority first
-        {
-            "state_name": "PAYMENT",
-            "selector": ':text-matches("Credit / Debit / ATM Card", "i") >> xpath=ancestor::*[self::label or self::div][1]',
-            "context": "page"
-        },
-        {
-            "state_name": "ORDER_SUMMARY",
-            "selector": 'button:has-text("CONTINUE")',
-            "context": "page"
-        },
-        {
-            "state_name": "ADDRESS",
-            "selector": 'label:has(input[name="address"])',
-            "context": "page"
-        },
-        {
-            "state_name": "LOGIN",
-            "selector": "input[type='text'][autocomplete='off']",
-            "context": "page"
-        },
-        # --- BANK OTP Checks --- (Add more specific checks before generic ones)
-        # Priority: Specific elements > Specific Iframes > Generic Iframes > Generic Page
-        # 1. Original SBI Check (Input + Visible Submit Button as sibling) - Strictest
-        {
-            "state_name": "BANK_OTP",
-            "selector": 'input#otpValue[type="password"]:visible +button:text-matches("Submit", "i"):visible',
-            "context": "page"
-        },
-        # 2. Simpler SBI Check (Input only) - Catches case where button isn't sibling or is disabled
-        {
-            "state_name": "BANK_OTP",
-            "selector": 'input#otpValue[type="password"]', # Primary SBI OTP input
-            "context": "page"
-        },
-        # 3. SBI page text hint (Lower priority fallback)
-        {
-            "state_name": "BANK_OTP",
-            "selector": 'h2:has-text("Enter One Time Password (OTP)")', # SBI page heading
-            "context": "page"
-        },
-        # 4. Check for Paytm/Other specific OTP input
-        {
-            "state_name": "BANK_OTP",
-            "selector": 'input#otp[type="tel"]', # Paytm page often uses this
-            "context": "page"
-        },
-        # 5. Check common OTP input patterns within potential payment IFRAMES
-        {
-            "state_name": "BANK_OTP",
-            "selector": 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i], input[placeholder*="otp" i]', # Broad input patterns
-            "context": "iframe",
-            # Added paytm src selector, kept others
-            "iframe_selectors": [
-                'iframe[src*="paytm"]', # Specific to paytm
-                'iframe[id*="card"]',
-                'iframe[name*="card"]',
-                'iframe[title*="3D Secure"]',
-                'iframe[id*="acs"]',
-                'iframe[name*="acs"]',
-                'iframe' # Generic fallback iframe
-            ]
-        },
-        # 6. Check common OTP input patterns on the MAIN PAGE (Lower priority than specific inputs/iframes)
-        {
-            "state_name": "BANK_OTP",
-            "selector": 'input[type="password"], input[type="tel"], input[name*="otp" i], input[id*="otp" i], input[placeholder*="otp" i]', # Broad input patterns
-            "context": "page"
-        },
-        # Add signatures for other page types or OTP variations here
-    ]
+    if "bank_otp" not in active_processes[process_id]["data"]:
+        update_process_status(process_id, "ERROR", "Bank OTP missing after waiting")
+        return False
+    bank_otp = active_processes[process_id]["data"]["bank_otp"]
+    print(f"Retrieved Bank OTP. Asking Gemini to find elements...")
 
-    # Timeout for each individual visibility check (in milliseconds)
-    check_timeout = 5000 # Increased from 3000
-    # Timeout for checking if an iframe itself is visible (shorter)
-    iframe_visible_timeout = 500
+    # 2. Get Screenshot for Gemini
+    try:
+        # Take screenshot again *after* OTP is available, in case page changed slightly
+        screenshot_bytes = await page.screenshot()
+        screenshot_path_gemini = await create_debug_screenshot(page, "bank_otp_for_gemini")
+        add_process_screenshot(process_id, screenshot_path_gemini)
+    except Exception as ss_err:
+        update_process_status(process_id, "ERROR", f"Failed to take screenshot for Gemini: {ss_err}")
+        return False
 
-    print("--- Detecting Page State ---")
-    for signature in page_signatures:
-        state_name = signature["state_name"]
-        selector = signature["selector"]
-        context_type = signature.get("context", "page")
-        iframe_selectors = signature.get("iframe_selectors")
-        search_context_msg = ""
+    # 3. Call Gemini Vision
+    prompt = """
+Analyze this bank OTP page screenshot. Identify the CSS selectors for the following elements:
+1.  The primary input field where the user should type the One-Time Password (OTP).
+2.  The main confirmation or submit button to click after entering the OTP (e.g., "Submit", "Confirm", "Pay").
 
-        # print(f"Checking for state: {state_name}...") # Optional: More verbose logging
+Return the response ONLY as a JSON object with the following keys:
+- "otp_input_selector": The CSS selector for the OTP input field.
+- "submit_button_selector": The CSS selector for the submit button.
 
+Example:
+{
+  "otp_input_selector": "input#otpValue[type='password']",
+  "submit_button_selector": "button:text-matches('Submit', 'i')"
+}
+
+If you cannot confidently identify one or both selectors, return null for that key.
+"""
+    gemini_result = await call_gemini_vision(screenshot_bytes, prompt)
+
+    # 4. Process Gemini Response
+    if not gemini_result or not gemini_result.get("otp_input_selector") or not gemini_result.get("submit_button_selector"):
+        print("Error: Gemini failed to provide valid selectors. Cannot proceed with OTP submission.")
+        # Optional: Fallback to multi-attempt here?
+        update_process_status(process_id, "ERROR", "Gemini Vision failed to identify OTP elements.")
+        # return await handle_bank_otp_multi_attempt(process_id, page) # Example fallback
+        return False
+
+    otp_selector = gemini_result["otp_input_selector"]
+    submit_selector = gemini_result["submit_button_selector"]
+    # context = gemini_result.get("context", "page") # If context detection is added
+
+    print(f"Gemini identified selectors: OTP Input='{otp_selector}', Submit Button='{submit_selector}'")
+
+    # 5. Interact using Gemini's selectors (Assuming page context for now)
+    context_locator = page # Future: use context if Gemini provides it (e.g., iframe locator)
+    try:
+        # Find OTP Input
+        print(f"   Locating OTP input via Gemini: '{otp_selector}'")
+        otp_input = context_locator.locator(otp_selector).first
+        await otp_input.wait_for(state='visible', timeout=15000)
+        print(f"   OTP input found.")
+
+        # Find Submit Button
+        print(f"   Locating Submit button via Gemini: '{submit_selector}'")
+        submit_button = context_locator.locator(submit_selector).first
+        await submit_button.wait_for(state='visible', timeout=15000) # Consider waiting for enabled too? state='enabled'
+        print(f"   Submit button found.")
+
+        # Fill OTP
+        print(f"   Filling OTP...")
+        await otp_input.fill(bank_otp)
+        await page.wait_for_timeout(500)
+        print("   OTP Filled.")
+        screenshot_path = await create_debug_screenshot(page, f"otp_filled_gemini")
+        add_process_screenshot(process_id, screenshot_path)
+
+        # Click Submit
+        print(f"   Clicking Submit...")
         try:
-            if context_type == "page":
-                search_context_msg = "main page"
-                target_locator = page.locator(selector).first
-                print(f"\n>>> Debug: Checking state '{state_name}' (context: {search_context_msg}, selector: '{selector}')")
-                # pdb.set_trace()
-                if await target_locator.is_visible(timeout=check_timeout):
-                    print(f"Detected state: {state_name} (in {search_context_msg})")
-                    return state_name
+            await submit_button.click(timeout=10000)
+            print(f"   Clicked Submit successfully.")
+        except TimeoutError:
+            print(f"   Submit button timed out on click. Trying force click...")
+            await submit_button.click(force=True, timeout=10000)
+            print(f"   Clicked Submit (force=True).")
 
-            elif context_type == "iframe" and iframe_selectors:
-                search_context_msg = "iframes"
-                found_in_iframe = False
-                for iframe_selector in iframe_selectors:
-                    # print(f"  Checking iframe: {iframe_selector}") # Optional
-                    try:
-                        iframe = page.locator(iframe_selector).first
-                        # Quick check if iframe is present and visible
-                        if await iframe.is_visible(timeout=iframe_visible_timeout):
-                            # print(f"  Iframe {iframe_selector} is visible. Checking selector inside...") # Optional
-                            frame_context = iframe.frame_locator()
-                            target_locator = frame_context.locator(selector).first
-                            search_context_msg = f"iframe ('{iframe_selector}')"
-                            print(f"\n>>> Debug: Checking state '{state_name}' (context: {search_context_msg}, selector: '{selector}')")
-                            # pdb.set_trace()
-                            # Check if the target selector is visible within this iframe
-                            if await target_locator.is_visible(timeout=check_timeout):
-                                print(f"Detected state: {state_name} (in {search_context_msg})")
-                                return state_name # Found it, exit early
-                        # else: # Optional: log iframe not visible quickly
-                            # print(f"  Iframe {iframe_selector} not visible quickly.")
-                    except Exception as iframe_err:
-                        # Error locating/checking this specific iframe, try the next one
-                        # print(f"  Error checking iframe {iframe_selector}: {iframe_err}")
-                        continue
-                # If loop finishes without returning, it wasn't found in any specified iframe
+        # Wait for Navigation
+        print("   Waiting for page navigation/load after OTP submission...")
+        await page.wait_for_load_state('networkidle', timeout=90000)
+        print("   Navigation/load complete.")
+        screenshot_path = await create_debug_screenshot(page, f"otp_success_gemini")
+        add_process_screenshot(process_id, screenshot_path)
 
-            else:
-                 print(f"Warning: Skipping signature for {state_name} due to invalid context/config.")
-                 continue
+        # Success
+        final_url = page.url
+        print(f"   Final URL: {final_url}")
+        # TODO: Check final URL for success/failure if possible
+        update_process_status(process_id, "COMPLETED", f"Order completed (via Gemini Vision)")
+        return True
 
-        except Exception as e:
-            # Error during the is_visible check for this signature, move to the next
-            print(f"  Visibility check failed for state '{state_name}' (context: {search_context_msg}, selector: '{selector}'). Error: {e}")
-            pass # Continue to the next signature
-
-    # If no state matched after checking all signatures
-    print("Detected state: UNKNOWN (no signatures matched)")
-    return "UNKNOWN"
+    except TimeoutError as te:
+        error_msg = f"Timeout waiting for element identified by Gemini. Selector: {te}" # Improve error msg
+        print(f"   Gemini interaction failed: {error_msg}")
+        update_process_status(process_id, "ERROR", f"Timeout using Gemini selector: {error_msg}")
+        screenshot_path = await create_debug_screenshot(page, "bank_otp_gemini_timeout")
+        add_process_screenshot(process_id, screenshot_path)
+        # Optional Fallback here?
+        return False
+    except Exception as e:
+        error_msg = f"Error during interaction using Gemini selectors: {e}"
+        print(f"   Gemini interaction failed: {error_msg}")
+        update_process_status(process_id, "ERROR", error_msg)
+        screenshot_path = await create_debug_screenshot(page, "bank_otp_gemini_error")
+        add_process_screenshot(process_id, screenshot_path)
+        # Optional Fallback here?
+        return False
 
 # Navigation and core checkout functions
 
@@ -566,7 +417,7 @@ async def navigate_and_buy(process_id: str, page: Page, url: str) -> bool:
         # Navigate to product URL
         update_process_status(process_id, "NAVIGATING", f"Navigating to {url}")
         await page.goto(url, wait_until='networkidle', timeout=45000)
-        await page.wait_for_timeout(3000) # Allow page to settle
+        await page.wait_for_timeout(3000)  # Allow page to settle
 
         # Take screenshot after navigation
         screenshot_path = await create_debug_screenshot(page, "product_page_loaded")
@@ -632,7 +483,8 @@ async def navigate_and_buy(process_id: str, page: Page, url: str) -> bool:
                 screenshot_path = await create_debug_screenshot(page, "navigation_general_error")
                 add_process_screenshot(process_id, screenshot_path)
         except Exception as ss_err:
-             print(f"Could not take screenshot during navigation error handling: {ss_err}")
+            print(
+                f"Could not take screenshot during navigation error handling: {ss_err}")
         return False
 
 # Main process orchestrator
@@ -647,7 +499,8 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
     try:
         async with async_playwright() as p:
             # Launch browser
-            browser = await p.chromium.launch(headless=False) # Consider headless=True for production
+            # Consider headless=True for production
+            browser = await p.chromium.launch(headless=False)
 
             # Create or load context based on session
             if session_path and session_path.exists():
@@ -657,14 +510,16 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
                     context = await browser.new_context(storage_state=session_path)
                     print(f"Session loaded successfully from {session_path}")
                 except Exception as load_err:
-                    print(f"Warning: Failed to load session from {session_path}: {load_err}. Creating new context.")
+                    print(
+                        f"Warning: Failed to load session from {session_path}: {load_err}. Creating new context.")
                     # Fallback to new context if loading fails
                     context = await browser.new_context()
             else:
                 if session_path:
-                     print(f"Session file {session_path} not found. Creating new context.")
+                    print(
+                        f"Session file {session_path} not found. Creating new context.")
                 else:
-                     print("No session path provided. Creating new context.")
+                    print("No session path provided. Creating new context.")
                 update_process_status(
                     process_id, "INITIALIZING", "Creating new browser context")
                 context = await browser.new_context()
@@ -680,11 +535,11 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
                     # Optionally update status
                     current_status = get_process_status(process_id)
                     if current_status:
-                         update_process_status(
+                        update_process_status(
                             process_id,
                             current_status["stage"],
                             f"{current_status['message']} (Session saved)"
-                         )
+                        )
                 except Exception as e:
                     print(f"Error saving session state to {session_path}: {e}")
                     # Update status to reflect session saving error
@@ -706,8 +561,7 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
             #      await asyncio.sleep(float('inf')) # Keep open forever
 
             print(f"Process finished. Keeping browser open.")
-            await asyncio.sleep(float('inf')) # Keep open forever
-
+            await asyncio.sleep(float('inf'))  # Keep open forever
 
     except Exception as e:
         error_msg = f"Process manager error: {str(e)}"
@@ -715,7 +569,7 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
         # Ensure status reflects the manager-level error
         update_process_status(process_id, "ERROR", error_msg)
         print("Process encountered an error. Keeping browser open.")
-        await asyncio.sleep(float('inf')) # Keep open on error too
+        await asyncio.sleep(float('inf'))  # Keep open on error too
 
     finally:
         # Ensure browser and context are closed
@@ -731,7 +585,8 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
         #         print("Browser closed.")
         #     except Exception as br_close_err:
         #         print(f"Error closing browser: {br_close_err}")
-        print(f"Checkout process manager finished for process {process_id}. Browser remains open.")
+        print(
+            f"Checkout process manager finished for process {process_id}. Browser remains open.")
 
 # Handler functions for different checkout stages
 
@@ -947,11 +802,11 @@ async def handle_address_selection_api(process_id: str, page: Page):
         add_process_screenshot(process_id, screenshot_path)
         return False
 
-
 async def handle_order_summary_api(process_id: str, page: Page):
-    """Handle the order summary page."""
+    """Handle the order summary page and potential popups."""
     # Selector
     continue_button_selector = 'button:has-text("CONTINUE")'
+    accept_popup_button_selector = 'button.QqFHMw._0ofT-K.M5XAsp:has-text("Accept & Continue")' # Added selector for popup
 
     try:
         # Take screenshot of order summary page
@@ -965,14 +820,27 @@ async def handle_order_summary_api(process_id: str, page: Page):
         # Try to extract order details (optional)
         try:
             # Example: Extract total amount
-            total_amount_selector = 'span:text-matches("₹.*") >> nth=0'
-            total_amount = await page.locator(total_amount_selector).text_content()
+            # Using a more robust selector that finds the final amount row
+            total_amount_row_selector = 'div._1YBGQV' # Assuming this is the container for the total amount row
+            # Find the last span within this row, which usually holds the final price
+            total_amount_locator = page.locator(f'{total_amount_row_selector} span').last
+            if await total_amount_locator.is_visible(timeout=5000):
+                total_amount = await total_amount_locator.text_content()
+                update_process_status(process_id, "ORDER_SUMMARY", "Processing order summary", {
+                    "total_amount": total_amount.strip() if total_amount else "Unknown"
+                })
+            else:
+                 update_process_status(process_id, "ORDER_SUMMARY", "Processing order summary", {
+                    "total_amount": "Unknown (Selector not found/visible)"
+                 })
 
-            update_process_status(process_id, "ORDER_SUMMARY", "Processing order summary", {
-                "total_amount": total_amount.strip() if total_amount else "Unknown"
+        except Exception as detail_ex:
+            print(f"Could not extract order details: {detail_ex}")
+            # Update status even if details extraction fails
+            update_process_status(process_id, "ORDER_SUMMARY", "Processing order summary (Details extraction failed)", {
+                "total_amount": "Unknown"
             })
-        except:
-            pass
+
 
         # Locate and click the CONTINUE button
         continue_button = page.locator(continue_button_selector).first
@@ -980,15 +848,59 @@ async def handle_order_summary_api(process_id: str, page: Page):
 
         # Check if button is enabled
         if not await continue_button.is_enabled(timeout=1000):
+            print("CONTINUE button not enabled, waiting...")
             await page.wait_for_timeout(3000)  # Extra wait
+            if not await continue_button.is_enabled(timeout=1000):
+                 print("CONTINUE button still not enabled after wait.")
+                 # Optional: Raise error or try force click depending on desired robustness
+                 # For now, we'll try clicking anyway
 
         await continue_button.click()
+        print("Clicked CONTINUE on order summary.")
 
-        # Wait for the next page to load
+        # Wait for potential page transition or overlay
+        # Using a combination of networkidle and timeout to be safe
+        try:
+            print("Waiting after CONTINUE click (networkidle)...")
+            await page.wait_for_load_state('networkidle', timeout=15000) # Reduced timeout, popup might appear before full load
+            print("Network became idle or timeout reached.")
+        except TimeoutError:
+            print("Timeout waiting for networkidle after CONTINUE, proceeding to check for popup.")
+
+
+        # --- Check for "Accept & Continue" Popup ---
+        await page.wait_for_timeout(1000) # Small pause before checking popup
+        try:
+            print("Checking for 'Accept & Continue' popup...")
+            popup_button = page.locator(accept_popup_button_selector).first
+            # Use a short timeout for the check
+            if await popup_button.is_visible(timeout=5000):
+                 print("Popup found. Clicking 'Accept & Continue'...")
+                 await popup_button.click()
+                 print("Clicked 'Accept & Continue' popup button.")
+                 # Wait a bit after clicking the popup
+                 await page.wait_for_timeout(2000)
+                 # Optional: Wait for load state again if popup click triggers navigation
+                 print("Waiting after popup click (load)...")
+                 await page.wait_for_load_state('load', timeout=20000)
+                 print("Load state reached after popup click.")
+            else:
+                 print("Popup button not visible.")
+        except TimeoutError:
+            print("Popup 'Accept & Continue' button not found within timeout.")
+        except Exception as popup_err:
+            print(f"Error checking/clicking popup: {popup_err}")
+        # --- End Popup Check ---
+
+
+        # Wait for the *final* page load after Continue/Popup click
+        print("Final wait for page load after summary actions...")
         await page.wait_for_load_state('networkidle', timeout=30000)
+        print("Final page load complete after summary.")
 
-        # Take screenshot after clicking CONTINUE
-        screenshot_path = await create_debug_screenshot(page, "after_summary_continue_click")
+
+        # Take screenshot after clicking CONTINUE (and potentially popup)
+        screenshot_path = await create_debug_screenshot(page, "after_summary_actions")
         add_process_screenshot(process_id, screenshot_path)
 
         update_process_status(
@@ -1030,11 +942,12 @@ async def handle_payment_api(process_id: str, page: Page):
         print("Using context: page (iframe logic removed)")
 
         # Wait for card number field
-        card_number_input = context_locator.locator(card_number_input_selector).first
+        card_number_input = context_locator.locator(
+            card_number_input_selector).first
         await card_number_input.wait_for(state='visible', timeout=30000)
 
         # Determine expiry format
-        expiry_input_type = 'combined' # Assume combined input MM / YY first
+        expiry_input_type = 'combined'  # Assume combined input MM / YY first
         try:
             await context_locator.locator(valid_thru_input_selector).wait_for(state='visible', timeout=2000)
             print("Detected combined MM / YY expiry input.")
@@ -1047,12 +960,13 @@ async def handle_payment_api(process_id: str, page: Page):
                 print("Detected separate Month/Year dropdowns for expiry.")
             except TimeoutError:
                 # If neither found, proceed assuming combined as default but log warning
-                print("Warning: Could not definitively detect expiry input format. Assuming combined MM / YY.")
+                print(
+                    "Warning: Could not definitively detect expiry input format. Assuming combined MM / YY.")
                 expiry_input_type = 'combined'
 
         # Update process status requesting payment details
         update_process_status(process_id, "PAYMENT_REQUESTED", "Please provide payment details via API", {
-            "expiry_input_type": expiry_input_type # Inform client of expected format
+            "expiry_input_type": expiry_input_type  # Inform client of expected format
         })
 
         # Take screenshot before payment details
@@ -1096,7 +1010,8 @@ async def handle_payment_api(process_id: str, page: Page):
                 try:
                     await context_locator.locator(valid_thru_input_selector).fill(expiry_combined)
                 except Exception as fill_err:
-                    print(f"Failed to fill expiry even with fallback: {fill_err}")
+                    print(
+                        f"Failed to fill expiry even with fallback: {fill_err}")
 
             await page.wait_for_timeout(500)
 
@@ -1115,8 +1030,10 @@ async def handle_payment_api(process_id: str, page: Page):
                 await payment_form.wait_for(state='attached', timeout=10000)
                 print("Payment form found.")
             except TimeoutError:
-                print("Timeout waiting for payment form (form#cards). Cannot proceed reliably.")
-                update_process_status(process_id, "ERROR", "Payment form (form#cards) not found.")
+                print(
+                    "Timeout waiting for payment form (form#cards). Cannot proceed reliably.")
+                update_process_status(
+                    process_id, "ERROR", "Payment form (form#cards) not found.")
                 # Add screenshot here for debugging
                 screenshot_path_form_error = await create_debug_screenshot(page, "payment_form_not_found")
                 add_process_screenshot(process_id, screenshot_path_form_error)
@@ -1138,14 +1055,16 @@ async def handle_payment_api(process_id: str, page: Page):
             print(f"Locating PAY button within form#cards just before clicking...")
             try:
                 # Locate within the form
-                pay_button_locator = payment_form.locator(f'button:text-matches("{pay_button_selector_primary_regex}", "i")').first
+                pay_button_locator = payment_form.locator(
+                    f'button:text-matches("{pay_button_selector_primary_regex}", "i")').first
                 # Only wait for visible, not enabled (like original bot)
                 await pay_button_locator.wait_for(state='visible', timeout=25000)
                 print("PAY button located and visible within form.")
                 pay_button_to_click = pay_button_locator
 
             except TimeoutError as te:
-                print(f"Timeout waiting for PAY button visibility within form: {te}")
+                print(
+                    f"Timeout waiting for PAY button visibility within form: {te}")
                 # Optional: Could add a fallback search outside the form here if needed
                 update_process_status(
                     process_id, "ERROR", f"Timeout waiting for PAY button visibility: {str(te)}")
@@ -1153,11 +1072,12 @@ async def handle_payment_api(process_id: str, page: Page):
                 add_process_screenshot(process_id, screenshot_path_error)
                 return False
             except Exception as e:
-                 print(f"Error locating PAY button: {e}")
-                 update_process_status(process_id, "ERROR", f"Error locating PAY button: {str(e)}")
-                 screenshot_path_error = await create_debug_screenshot(page, "pay_button_locate_error")
-                 add_process_screenshot(process_id, screenshot_path_error)
-                 return False
+                print(f"Error locating PAY button: {e}")
+                update_process_status(
+                    process_id, "ERROR", f"Error locating PAY button: {str(e)}")
+                screenshot_path_error = await create_debug_screenshot(page, "pay_button_locate_error")
+                add_process_screenshot(process_id, screenshot_path_error)
+                return False
 
             # If we found the button, attempt to click it immediately
             if pay_button_to_click:
@@ -1171,7 +1091,8 @@ async def handle_payment_api(process_id: str, page: Page):
                         process_id, "PAYMENT_CLICKED", "Pay button clicked, waiting for bank page")
 
                 except Exception as click_err:
-                    print(f"Click failed: {click_err}. Attempting force click...")
+                    print(
+                        f"Click failed: {click_err}. Attempting force click...")
                     try:
                         await pay_button_to_click.click(force=True, timeout=10000)
                         print("Clicked PAY button (force=True).")
@@ -1183,16 +1104,18 @@ async def handle_payment_api(process_id: str, page: Page):
                         update_process_status(
                             process_id, "ERROR", f"Failed to click PAY button (standard and force): {str(force_click_err)}")
                         screenshot_path_click_error = await create_debug_screenshot(page, "pay_button_click_error")
-                        add_process_screenshot(process_id, screenshot_path_click_error)
+                        add_process_screenshot(
+                            process_id, screenshot_path_click_error)
                         return False
             else:
                 # This case should ideally be caught by the try/except above
                 print("Error: Pay button locator was not assigned.")
-                update_process_status(process_id, "ERROR", "Pay button locator was None before click attempt.")
+                update_process_status(
+                    process_id, "ERROR", "Pay button locator was None before click attempt.")
                 return False
 
             # --- Handle potential 'Save Card' popup (Quick attempt) ---
-            await page.wait_for_timeout(500) # Brief pause after pay click
+            await page.wait_for_timeout(500)  # Brief pause after pay click
             try:
                 maybe_later_selector = 'button:has-text("Maybe later")'
                 maybe_later_button = page.locator(maybe_later_selector).first
@@ -1200,11 +1123,14 @@ async def handle_payment_api(process_id: str, page: Page):
                 # Use a very short timeout - just click if immediately visible
                 await maybe_later_button.click(timeout=2000)
                 print("Clicked 'Maybe later' button during quick check.")
-                await page.wait_for_timeout(500) # Small pause after clicking popup
+                # Small pause after clicking popup
+                await page.wait_for_timeout(500)
             except TimeoutError:
-                print("'Maybe later' button not immediately visible or clickable. Proceeding...")
+                print(
+                    "'Maybe later' button not immediately visible or clickable. Proceeding...")
             except Exception as e:
-                print(f"Error during quick check/click for 'Maybe later': {e}. Proceeding...")
+                print(
+                    f"Error during quick check/click for 'Maybe later': {e}. Proceeding...")
             # --- End Quick Popup Handling ---
 
             # Wait for navigation to bank OTP page (Main wait)
@@ -1220,7 +1146,8 @@ async def handle_payment_api(process_id: str, page: Page):
             update_process_status(
                 process_id, "PAYMENT_NAVIGATION_COMPLETE", "Navigation to bank page complete")
 
-            return True # Return success, the loop will detect the next state (hopefully BANK_OTP)
+            # Return success, the loop will detect the next state (hopefully BANK_OTP)
+            return True
         else:
             update_process_status(process_id, "ERROR",
                                   "Payment details missing from process data")
@@ -1238,11 +1165,11 @@ async def start_purchase_process(
     process_id: str,
     product_url: str,
     browser_context,
-    session_path: Optional[Path] = None # Keep session_path for potential future use
+    # Keep session_path for potential future use
+    session_path: Optional[Path] = None
 ) -> bool:
-    """Start the purchase process using a state-driven approach."""
+    """Start the purchase process using a sequential, state-driven approach."""
     page = None
-    # Removed initial is_logged_in flag
     try:
         page = await browser_context.new_page()
 
@@ -1250,79 +1177,118 @@ async def start_purchase_process(
         if process_id not in event_locks:
             event_locks[process_id] = asyncio.Event()
 
-        # 1. Navigate and click Buy Now
+        # --- 1. Navigate and click Buy Now ---
         update_process_status(process_id, "NAVIGATING", "Navigating to product page", {
             "product_url": product_url
         })
         navigation_success = await navigate_and_buy(process_id, page, product_url)
         if not navigation_success:
-            return False # navigate_and_buy updates status on failure
+            print("Failed during initial navigation or Buy Now click.")
+            return False  # navigate_and_buy updates status on failure
 
-        # Initial status after clicking Buy Now (before state detection loop)
-        print(f"Clicked 'Buy Now'. Proceeding to state detection loop.")
-        update_process_status(process_id, "POST_BUY_NOW", "Clicked Buy Now, detecting next step.")
+        print("Clicked 'Buy Now'. Proceeding with checkout steps sequentially.")
+        update_process_status(process_id, "POST_BUY_NOW",
+                              "Clicked Buy Now, checking login status.")
 
-        # --- Main State Handling Loop ---
-        while True:
-            # 2. Detect current page state
-            print(f"\n--- Detecting current state ---")
-            current_state = await detect_page_state(page)
-            print(f"Detected state: {current_state}")
+        # --- 2. Check Login Status & Handle Login if Needed ---
+        try:
+            print("Checking login status via localStorage...")
+            is_logged_in_str = await page.evaluate("() => localStorage.getItem('isLoggedIn')")
+            is_logged_in = is_logged_in_str == 'true'
+            print(f"localStorage 'isLoggedIn' value: '{is_logged_in_str}' (Parsed as: {is_logged_in})")
 
-            # 3. Check for terminal states
-            if current_state == "COMPLETED":
-                update_process_status(process_id, "COMPLETED", "Checkout process completed successfully")
-                return True
-            elif current_state == "ERROR":
-                print("ERROR state detected or handler reported error.")
-                if get_process_status(process_id).get("stage") != "ERROR":
-                    update_process_status(process_id, "ERROR", "Checkout failed in an unknown way.")
-                return False
-            elif current_state == "UNKNOWN":
-                print("Handling UNKNOWN state...")
-                screenshot_path = await create_debug_screenshot(page, "unknown_state_in_loop")
-                add_process_screenshot(process_id, screenshot_path)
-                update_process_status(process_id, "ERROR", f"Cannot determine page state. URL: {page.url}")
-                return False
-
-            # 4. State-specific handling using the dictionary
-            handler_func = STATE_HANDLERS.get(current_state)
-
-            if handler_func:
-                print(f"Handling {current_state} state...")
-                success = await handler_func(process_id, page)
-                if not success:
-                    return False # Handler updates status on error
-                print(f"Handler for {current_state} completed successfully.")
-                # Loop continues to re-detect state for the next step
+            if not is_logged_in:
+                print("User is not logged in. Starting login flow...")
+                login_success = await handle_login_api(process_id, page)
+                if not login_success:
+                    print("Login flow failed.")
+                    # handle_login_api should set ERROR status
+                    return False
+                print("Login flow completed successfully.")
             else:
-                 # Should not happen if detect_page_state and STATE_HANDLERS are comprehensive
-                 # for known intermediate states.
-                print(f"Error: No handler defined for detected state '{current_state}'. Stopping.")
-                screenshot_path = await create_debug_screenshot(page, f"no_handler_for_{current_state}")
-                add_process_screenshot(process_id, screenshot_path)
-                update_process_status(process_id, "ERROR", f"Internal error: No handler for state '{current_state}'. URL: {page.url}")
-                return False
+                print("User is already logged in. Skipping login flow.")
+                # Update status to reflect skipping login
+                update_process_status(process_id, "LOGIN_SKIPPED", "User already logged in")
 
-            # Optional brief sleep
-            # await asyncio.sleep(0.2)
+        except Exception as login_check_err:
+            error_msg = f"Error checking login status or during login flow: {login_check_err}"
+            print(error_msg)
+            update_process_status(process_id, "ERROR", error_msg)
+            screenshot_path = await create_debug_screenshot(page, "login_check_error")
+            add_process_screenshot(process_id, screenshot_path)
+            return False
+
+        # --- 3. Handle Address Selection ---
+        print("Proceeding to address selection...")
+        address_success = await handle_address_selection_api(process_id, page)
+        if not address_success:
+            print("Address selection failed.")
+            # handle_address_selection_api should set ERROR status
+            return False
+        print("Address selection completed successfully.")
+
+        # --- 4. Handle Order Summary (includes popup handling) ---
+        print("Proceeding to order summary...")
+        summary_success = await handle_order_summary_api(process_id, page)
+        if not summary_success:
+            print("Order summary failed.")
+            # handle_order_summary_api should set ERROR status
+            return False
+        print("Order summary completed successfully.")
+
+        # --- 5. Handle Payment ---
+        print("Proceeding to payment...")
+        payment_success = await handle_payment_api(process_id, page)
+        if not payment_success:
+            print("Payment handling failed.")
+            # handle_payment_api should set ERROR status
+            return False
+        print("Payment details submitted successfully, proceeding to bank OTP.")
+        # Status should be PAYMENT_NAVIGATION_COMPLETE or similar after handle_payment_api succeeds
+
+        # --- 6. Handle Bank OTP ---
+        print("Proceeding to Bank OTP handling...")
+        # Use the Gemini handler directly as it's now the primary method
+        otp_success = await handle_bank_otp_gemini(process_id, page)
+        if not otp_success:
+            print("Bank OTP handling failed.")
+            # handle_bank_otp_gemini should set ERROR status
+            return False
+        print("Bank OTP handling completed successfully.")
+        # handle_bank_otp_gemini should set COMPLETED status on success
+
+        # --- 7. Final Check ---
+        final_status = get_process_status(process_id)
+        if final_status and final_status.get("stage") == "COMPLETED":
+            print("Checkout process finished successfully.")
+            return True
+        else:
+            print(f"Checkout process ended with unexpected status: {final_status.get('stage')}")
+            if final_status and final_status.get("stage") != "ERROR": # Ensure error state if not completed
+                update_process_status(process_id, "ERROR", f"Process ended unexpectedly after OTP step. Final Stage: {final_status.get('stage')}")
+            return False
 
     except Exception as e:
-        error_message = f"An error occurred in start_purchase_process: {str(e)}"
+        error_message = f"An critical error occurred in start_purchase_process: {str(e)}"
         print(error_message)
-        update_process_status(process_id, "ERROR", error_message)
+        # Ensure status is updated even for top-level errors
+        if get_process_status(process_id).get("stage") != "ERROR":
+             update_process_status(process_id, "ERROR", error_message)
         if page and not page.is_closed():
-             try:
-                 screenshot_path = await create_debug_screenshot(page, "main_process_exception")
-                 add_process_screenshot(process_id, screenshot_path)
-             except Exception as ss_err:
-                 print(f"Failed to take screenshot during exception handling: {ss_err}")
+            try:
+                screenshot_path = await create_debug_screenshot(page, "main_process_critical_exception")
+                add_process_screenshot(process_id, screenshot_path)
+            except Exception as ss_err:
+                print(
+                    f"Failed to take screenshot during critical exception handling: {ss_err}")
         return False
     finally:
+        # Cleanup event lock if it exists
         if process_id in event_locks:
             if not event_locks[process_id].is_set():
-                event_locks[process_id].set()
+                event_locks[process_id].set() # Ensure any waiting handlers are released
             del event_locks[process_id]
+        print(f"start_purchase_process finished for {process_id}.")
 
 
 async def terminate_process(process_id: str) -> bool:
@@ -1357,10 +1323,12 @@ async def terminate_process(process_id: str) -> bool:
     return True
 
 # State to Handler Mapping - Moved here after handlers are defined
+# No longer needed for sequential flow, but kept for reference or future state checks
 STATE_HANDLERS = {
     "LOGIN": handle_login_api,
     "ADDRESS": handle_address_selection_api,
     "ORDER_SUMMARY": handle_order_summary_api,
     "PAYMENT": handle_payment_api,
-    "BANK_OTP": handle_bank_otp_api,
-}
+    # Consolidated Bank OTP handling
+    "BANK_OTP": handle_bank_otp_gemini,
+} 
