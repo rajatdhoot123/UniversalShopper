@@ -20,7 +20,8 @@ from flipkart_bot_api import (
     submit_payment_details,
     get_process_status,
     checkout_process_manager,
-    terminate_process
+    terminate_process,
+    submit_phone_number
 )
 
 app = FastAPI(title="Flipkart Checkout Bot API",
@@ -82,6 +83,10 @@ class BankOTPRequest(BaseModel):
     otp: str
 
 
+class PhoneNumberRequest(BaseModel):
+    phone_number: str
+
+
 class StatusResponse(BaseModel):
     status: str
     message: str
@@ -116,9 +121,13 @@ async def start_process(request: ProductRequest, background_tasks: BackgroundTas
 
         # Initialize session
         session_path = None
-        if request.use_existing_session and request.session_name:
-            session_path = sessions_dir / f"{request.session_name}.json"
-            if not session_path.exists():
+        if request.session_name:
+            # Always construct the path, let the process manager handle 
+            # checking if it exists or creating it
+            session_path = str(sessions_dir / f"{request.session_name}.json")
+            
+            # Inform if we're using existing or creating new
+            if request.use_existing_session and not Path(session_path).exists():
                 return JSONResponse(
                     status_code=404,
                     content={
@@ -127,8 +136,6 @@ async def start_process(request: ProductRequest, background_tasks: BackgroundTas
                         "data": None
                     }
                 )
-        elif not request.use_existing_session and request.session_name:
-            session_path = sessions_dir / f"{request.session_name}.json"
 
         # Start the process in background
         background_tasks.add_task(
@@ -190,9 +197,32 @@ async def list_processes():
     }
 
 
+@app.post("/process/{process_id}/phone_number", response_model=StatusResponse)
+async def handle_phone_submission(process_id: str, phone_request: PhoneNumberRequest):
+    """Submit phone number for login"""
+    print(f"[handle_phone_submission] Submitting phone number for process {process_id}")
+    success = await submit_phone_number(process_id, phone_request.phone_number)
+    if not success:
+        return JSONResponse(
+            status_code=404, # Or 409 Conflict if the stage is wrong
+            content={
+                "status": "error",
+                "message": f"Process with ID {process_id} not found or not expecting phone number",
+                "data": None
+            }
+        )
+
+    return {
+        "status": "success",
+        "message": "Phone number submitted successfully",
+        "data": None
+    }
+
+
 @app.post("/process/{process_id}/login-otp", response_model=StatusResponse)
 async def handle_login_otp(process_id: str, otp_request: OTPRequest):
     """Submit OTP for login"""
+    print(f"[handle_login_otp] Submitting OTP for process {process_id}")
     success = await submit_login_otp(process_id, otp_request.otp)
     if not success:
         return JSONResponse(

@@ -62,7 +62,18 @@ async def create_or_load_session(session_path: Optional[Path] = None) -> Path:
         # Generate a timestamp-based session name
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         session_path = sessions_dir / f"session_{timestamp}.json"
+    elif isinstance(session_path, str):
+        # Convert string path to Path object if needed
+        session_path = Path(session_path)
+        # Ensure the path includes the sessions directory
+        if not str(session_path).startswith(str(sessions_dir)):
+            session_path = sessions_dir / session_path
+        # Ensure it has .json extension
+        if not session_path.suffix:
+            session_path = session_path.with_suffix('.json')
 
+    # At this point, session_path is always a Path object pointing to where
+    # we want to save the session, regardless of whether the file exists yet
     return session_path
 
 
@@ -148,6 +159,30 @@ def add_process_screenshot(process_id: str, screenshot_path: str):
         })
 
 # Functions for handling user inputs
+
+
+async def submit_phone_number(process_id: str, phone_number: str) -> bool:
+    """Submit phone number for login."""
+    if process_id not in active_processes or active_processes[process_id]["stage"] != "LOGIN_REQUIRED":
+        print(
+            f"[submit_phone_number] Process {process_id} not found or not in LOGIN_REQUIRED stage. Current stage: {active_processes.get(process_id, {}).get('stage')}"
+        )
+        return False
+
+    print(f"[submit_phone_number] Process {process_id} found in LOGIN_REQUIRED stage. Checking event_locks...")
+    if process_id not in event_locks:
+        print(f"[submit_phone_number] Event lock NOT FOUND for process {process_id}. Returning False.")
+        return False
+
+    # Store phone number in process data
+    update_process_status(process_id, "PHONE_SUBMITTED", "Phone number submitted, processing", {
+        "phone_number": phone_number
+    })
+
+    # Set the event to resume the checkout process
+    print(f"[submit_phone_number] Event lock found for process {process_id}. Setting event.")
+    event_locks[process_id].set()
+    return True
 
 
 async def submit_login_otp(process_id: str, otp: str) -> bool:
@@ -560,6 +595,11 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
     browser = None
     context = None
     try:
+        # Process session_path through create_or_load_session
+        if session_path:
+            session_path = await create_or_load_session(session_path)
+            print(f"Session path: {session_path}")
+
         async with async_playwright() as p:
             # Launch browser
             # Consider headless=True for production
@@ -580,7 +620,7 @@ async def checkout_process_manager(process_id: str, product_url: str, session_pa
             else:
                 if session_path:
                     print(
-                        f"Session file {session_path} not found. Creating new context.")
+                        f"Session file {session_path} not found. Creating new context. Will save to this path later.")
                 else:
                     print("No session path provided. Creating new context.")
                 update_process_status(
@@ -672,9 +712,19 @@ async def handle_login_api(process_id: str, page: Page):
     add_process_screenshot(process_id, screenshot_path)
 
     # Wait for phone number input via API
-    # For simplicity in this API version, we'll use a hardcoded phone number
-    # In a real implementation, this would come from the client
-    phone_number = "1234567890"  # This would come from the client
+    if process_id not in event_locks:
+        event_locks[process_id] = asyncio.Event()
+
+    # Wait for the API to provide phone number (user interaction)
+    await event_locks[process_id].wait()
+    event_locks[process_id].clear()  # Reset for next wait
+
+    # Get phone number from process data
+    if "phone_number" in active_processes[process_id]["data"]:
+        phone_number = active_processes[process_id]["data"]["phone_number"]
+    else:
+        update_process_status(process_id, "ERROR", "Phone number missing from process data")
+        return False
 
     try:
         # Enter phone number
