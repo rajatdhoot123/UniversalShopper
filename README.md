@@ -19,6 +19,8 @@ The API handles several steps in the checkout flow, including:
 
 **Disclaimer:** This project is intended for educational purposes and personal use only. Automating website interactions may violate the terms of service of the target website (Flipkart). Use responsibly and at your own risk.
 
+**Frontend UI:** A compatible frontend UI built with Next.js is available here: [universalshopper-fe](https://github.com/rajatdhoot123/universalshopper-fe)
+
 ## Features
 
 *   **RESTful API:** All functionality is exposed via a RESTful API built with FastAPI.
